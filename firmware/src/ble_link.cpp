@@ -172,7 +172,7 @@ static void cmd_status(Link& l) {
            "{\"state\":\"%s\",\"neutral_us\":%u,\"neutral_learned\":%s,\"throttle_ok\":%s,"
            "\"throttle_us\":%u,\"runs\":%d,\"free_slots\":%d,\"overwritten_unread\":%lu,"
            "\"time_set\":%s,\"ram_run\":%s,\"imu_ok\":%s,\"flash_ok\":%s,\"imu_overruns\":%lu,"
-           "\"imu_samples\":%lu,\"hall_edges\":%lu,\"hall_glitches\":%lu,\"uptime_ms\":%lu,"
+           "\"imu_samples\":%lu,\"imu_misaligned\":%lu,\"hall_edges\":%lu,\"hall_glitches\":%lu,\"uptime_ms\":%lu,"
            "\"boot\":%lu,\"last_save_ms\":%lu,\"last_crc_ms\":%lu,\"connected\":%s,\"sim\":%s}",
            logger_state_name(), throttle_neutral_us(), throttle_neutral_learned() ? "true" : "false",
            throttle_signal_ok(now) ? "true" : "false", throttle_tick_width(now),
@@ -180,7 +180,8 @@ static void cmd_status(Link& l) {
            (unsigned long)flash_overwritten_unread(), logger_time_set() ? "true" : "false",
            logger_ram_run_available() ? "true" : "false", imu_ok() ? "true" : "false",
            flash_ok() ? "true" : "false", (unsigned long)imu_overrun_count(),
-           (unsigned long)imu_sample_count(), (unsigned long)hall_edge_count(),
+           (unsigned long)imu_sample_count(), (unsigned long)imu_misaligned_count(),
+           (unsigned long)hall_edge_count(),
            (unsigned long)hall_glitch_count(), (unsigned long)millis(),
            (unsigned long)flash_boot_count(), (unsigned long)logger_last_save_ms(),
            (unsigned long)logger_last_crc_ms(), ble_connected() ? "true" : "false",

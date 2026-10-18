@@ -74,7 +74,7 @@
 #define IMU_GYRO_RANGE_DPS  500     // ±500 dps
 #define IMU_ODR_HZ          833
 #define IMU_I2C_ADDR        0x6A    // LSM6DS3TR-C na Wire1 (SA0 = 0)
-#define IMU_I2C_HZ          400000
+#define IMU_I2C_HZ          400000  // TWIM1: 400 kHz to maksimum nRF52840 (informacyjnie)
 
 // ---------------------------------------------------------------- flash
 #define FLASH_SLOT_SIZE     (128 * 1024)  // wielokrotność bloku kasowania 64 kB

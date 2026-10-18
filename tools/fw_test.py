@@ -195,7 +195,10 @@ def t_powerloss(dev, a, port):
         do_launch(dev)
     except Exception:
         pass
-    dev.link.close()
+    try:
+        dev.link.close()
+    except Exception:
+        pass
     time.sleep(3)
     link, dev2 = connect(port, 15)
     runs_after = dev2.list_runs()
@@ -251,7 +254,7 @@ def t_get(dev, a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM0")
+    ap.add_argument("--port", default=None, help="domyślnie autowykrywanie (VID 0x2886)")
     ap.add_argument("--imu-seconds", type=float, default=10)
     ap.add_argument("--out", default="tools/runs")
     ap.add_argument("tests", nargs="*", default=["basic", "imu", "throttle", "hall", "logger", "get"])

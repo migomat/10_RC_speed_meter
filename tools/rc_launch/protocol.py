@@ -87,12 +87,25 @@ class _Demux:
         self._bin.clear()
 
 
+def find_port() -> str | None:
+    """Port USB Xiao (VID Seeed 0x2886); numer ttyACM zmienia się po resecie."""
+    from serial.tools import list_ports
+
+    for p in list_ports.comports():
+        if p.vid == 0x2886:
+            return p.device
+    return None
+
+
 class SerialLink:
     """USB CDC: tekst + 0x02 przed ramką binarną."""
 
-    def __init__(self, port: str = "/dev/ttyACM0"):
+    def __init__(self, port: str | None = None):
         import serial
 
+        port = port or find_port()
+        if not port:
+            raise ProtocolError("Nie znaleziono Xiao na USB")
         self.ser = serial.Serial(port, 115200, timeout=0.05)
         self.demux = _Demux()
         self._stop = False

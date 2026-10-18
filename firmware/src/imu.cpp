@@ -1,7 +1,6 @@
 #include "imu.h"
 
 #include <Arduino.h>
-#include <Wire.h>
 #include "config.h"
 
 // Rejestry LSM6DS3TR-C
@@ -15,6 +14,7 @@
 #define REG_CTRL6_C      0x15
 #define REG_CTRL8_XL     0x17
 #define REG_FIFO_STATUS1 0x3A
+#define REG_FIFO_STATUS3 0x3C
 #define REG_FIFO_DATA    0x3E
 #define WHO_AM_I_VALUE   0x6A
 
@@ -62,30 +62,90 @@
 
 #define IMU_PERIOD_US   (1000000u / IMU_ODR_HZ)
 #define HIST_LEN        32
-#define SETS_PER_READ   4     // 4 × 12 B = 48 B < bufor Wire (64 B)
+#define SETS_PER_READ   8     // 8 × 12 B = 96 B na transakcję (EasyDMA)
 #define MAX_SETS_PER_POLL 24  // ogranicza czas blokowania pętli (~7 ms)
 
 static bool     s_ok;
 static ImuRaw   s_hist[HIST_LEN];
 static uint32_t s_hist_n;          // liczba zapisanych (narastająco)
 static uint32_t s_overruns;
+static uint32_t s_misaligned;
 static bool     s_overrun_flag;
 static uint32_t s_last_t;
 
-static bool wr(uint8_t reg, uint8_t val) {
-  Wire1.beginTransmission(IMU_I2C_ADDR);
-  Wire1.write(reg);
-  Wire1.write(val);
-  return Wire1.endTransmission() == 0;
+// ---------------------------------------------------------------- I2C
+// Własna obsługa TWIM1 (piny Wire1) zamiast biblioteki Wire: Wire robi
+// powtórzony start programowo (SUSPEND po LASTTX). Gdy SoftDevice opóźni CPU
+// w tym oknie, TWIM czyta dodatkowe słowo z FIFO i zestawy się przesuwają
+// (zmierzone: ~1 % serii przy włączonym BLE, 0 bez BLE). Tu cała transakcja
+// zapis-rejestru → odczyt → STOP idzie sprzętowo (SHORTS), bez udziału CPU.
+#define TWIM NRF_TWIM1
+static uint8_t s_tx[2];
+
+static bool twim_wait(void) {
+  uint32_t t0 = millis();
+  while (!TWIM->EVENTS_STOPPED) {
+    if (TWIM->EVENTS_ERROR) {
+      TWIM->EVENTS_ERROR = 0;
+      TWIM->TASKS_STOP = 1;
+      uint32_t t1 = millis();
+      while (!TWIM->EVENTS_STOPPED && millis() - t1 < 5) {
+      }
+      TWIM->EVENTS_STOPPED = 0;
+      TWIM->ERRORSRC = TWIM->ERRORSRC;
+      return false;
+    }
+    if (millis() - t0 > 10) {
+      TWIM->TASKS_STOP = 1;
+      return false;
+    }
+  }
+  TWIM->EVENTS_STOPPED = 0;
+  return true;
 }
 
-static bool rdn(uint8_t reg, uint8_t* buf, uint8_t n) {
-  Wire1.beginTransmission(IMU_I2C_ADDR);
-  Wire1.write(reg);
-  if (Wire1.endTransmission(false) != 0) return false;
-  if (Wire1.requestFrom((uint8_t)IMU_I2C_ADDR, n) != n) return false;
-  for (uint8_t i = 0; i < n; i++) buf[i] = Wire1.read();
-  return true;
+static void twim_begin(void) {
+  uint32_t scl = g_ADigitalPinMap[PIN_WIRE1_SCL], sda = g_ADigitalPinMap[PIN_WIRE1_SDA];
+  const uint32_t cnf = (GPIO_PIN_CNF_DIR_Input << GPIO_PIN_CNF_DIR_Pos) |
+                       (GPIO_PIN_CNF_INPUT_Connect << GPIO_PIN_CNF_INPUT_Pos) |
+                       (GPIO_PIN_CNF_PULL_Pullup << GPIO_PIN_CNF_PULL_Pos) |
+                       (GPIO_PIN_CNF_DRIVE_S0D1 << GPIO_PIN_CNF_DRIVE_Pos);
+  NRF_GPIO_Type* port_scl = scl >= 32 ? NRF_P1 : NRF_P0;
+  NRF_GPIO_Type* port_sda = sda >= 32 ? NRF_P1 : NRF_P0;
+  port_scl->PIN_CNF[scl & 31] = cnf;
+  port_sda->PIN_CNF[sda & 31] = cnf;
+  TWIM->ENABLE = TWIM_ENABLE_ENABLE_Disabled << TWIM_ENABLE_ENABLE_Pos;
+  TWIM->PSEL.SCL = scl;
+  TWIM->PSEL.SDA = sda;
+  TWIM->FREQUENCY = TWIM_FREQUENCY_FREQUENCY_K400;  // maks. dla nRF52840 TWIM
+  TWIM->ADDRESS = IMU_I2C_ADDR;
+  TWIM->INTEN = 0;
+  TWIM->ENABLE = TWIM_ENABLE_ENABLE_Enabled << TWIM_ENABLE_ENABLE_Pos;
+}
+
+static bool wr(uint8_t reg, uint8_t val) {
+  s_tx[0] = reg;
+  s_tx[1] = val;
+  TWIM->SHORTS = TWIM_SHORTS_LASTTX_STOP_Msk;
+  TWIM->TXD.PTR = (uint32_t)s_tx;
+  TWIM->TXD.MAXCNT = 2;
+  TWIM->EVENTS_STOPPED = 0;
+  TWIM->EVENTS_ERROR = 0;
+  TWIM->TASKS_STARTTX = 1;
+  return twim_wait();
+}
+
+static bool rdn(uint8_t reg, uint8_t* buf, uint16_t n) {
+  s_tx[0] = reg;
+  TWIM->SHORTS = TWIM_SHORTS_LASTTX_STARTRX_Msk | TWIM_SHORTS_LASTRX_STOP_Msk;
+  TWIM->TXD.PTR = (uint32_t)s_tx;
+  TWIM->TXD.MAXCNT = 1;
+  TWIM->RXD.PTR = (uint32_t)buf;
+  TWIM->RXD.MAXCNT = n;
+  TWIM->EVENTS_STOPPED = 0;
+  TWIM->EVENTS_ERROR = 0;
+  TWIM->TASKS_STARTTX = 1;
+  return twim_wait() && TWIM->RXD.AMOUNT == n;
 }
 
 bool imu_begin(void) {
@@ -97,8 +157,7 @@ bool imu_begin(void) {
                        (GPIO_PIN_CNF_DRIVE_H0H1 << GPIO_PIN_CNF_DRIVE_Pos);
   NRF_P1->OUTSET = 1u << 8;
   delay(30);  // rozruch LSM6DS3 (inicjalizacja, poza pętlą główną)
-  Wire1.begin();
-  Wire1.setClock(IMU_I2C_HZ);
+  twim_begin();
 
   uint8_t who = 0;
   if (!rdn(REG_WHO_AM_I, &who, 1) || who != WHO_AM_I_VALUE) {
@@ -147,9 +206,12 @@ int imu_poll(uint32_t now_us) {
     words--;
     pattern = (pattern + 1) % 6;
   }
+  // Ostatni zestaw w FIFO może być w trakcie zapisu – czytanie do samego
+  // końca dawało czasem powtórzone/przesunięte słowa. Zostawiamy 1 zestaw.
   uint32_t sets = words / 6;
-  if (sets == 0) return 0;
-  uint32_t total = sets;
+  if (sets <= 1) return 0;
+  sets -= 1;
+  uint32_t total = sets + 1;
   if (sets > MAX_SETS_PER_POLL) sets = MAX_SETS_PER_POLL;
 
   int got = 0;
@@ -158,6 +220,13 @@ int imu_poll(uint32_t now_us) {
     if (n > SETS_PER_READ) n = SETS_PER_READ;
     uint8_t buf[SETS_PER_READ * 12];
     if (!rdn(REG_FIFO_DATA, buf, n * 12)) break;
+    // Kontrola wyrównania: po pełnych zestawach wzorzec musi wskazywać gx (0).
+    // Zestawy z przesuniętej serii są odrzucane, kolejne wywołanie wyrówna FIFO.
+    uint8_t pt[2];
+    if (!rdn(REG_FIFO_STATUS3, pt, 2) || (pt[0] | ((pt[1] & 0x03) << 8)) != 0) {
+      s_misaligned++;
+      break;
+    }
     for (int k = 0; k < n; k++) {
       const int16_t* v = (const int16_t*)(buf + k * 12);
       // Czas: ostatnia próbka w FIFO ≈ teraz, wcześniejsze co okres ODR
@@ -191,6 +260,7 @@ bool imu_get_at(uint32_t t_us, ImuRaw* out) {
 }
 
 uint32_t imu_overrun_count(void) { return s_overruns; }
+uint32_t imu_misaligned_count(void) { return s_misaligned; }
 bool imu_take_overrun_flag(void) {
   bool f = s_overrun_flag;
   s_overrun_flag = false;

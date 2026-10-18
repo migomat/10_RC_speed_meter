@@ -16,6 +16,7 @@ int      imu_poll(uint32_t now_us);
 // Najnowsza próbka z czasem <= t_us (+pół okresu). false = brak świeżej.
 bool     imu_get_at(uint32_t t_us, ImuRaw* out);
 uint32_t imu_overrun_count(void);
+uint32_t imu_misaligned_count(void);  // odrzucone serie FIFO (utrata wyrównania)
 bool     imu_take_overrun_flag(void);   // czy było przepełnienie od ostatniego wywołania
 uint32_t imu_sample_count(void);
 float    imu_accel_scale_g(void);

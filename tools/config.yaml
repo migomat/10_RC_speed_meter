@@ -1,0 +1,28 @@
+# Ustawienia analizy – te same nazwy i wartości domyślne co w aplikacji
+# (app/js/analysis.js: DEFAULT_SETTINGS) i firmware/src/config.h.
+final_drive_ratio: 5.0       # do uzupełnienia
+front_tire_diameter_mm: 64.0 # do uzupełnienia, kalibrowane
+imu_axes:                    # mapowanie osi płytki na osie auta
+  forward: "+x"
+  left: "+y"
+  up: "+z"
+# Oś pochylenia wynika z imu_axes: prędkość pochylenia (nos w górę = +)
+# = −ω wokół osi „left” (prawoskrętny układ forward/left/up).
+pitch_axis_gyro: "y"         # informacyjnie – oś płytki odpowiadająca „left”
+lowpass_hz: 25
+v_min_mps: 0.3
+# Wykrywanie spoczynku przed startem (bias IMU)
+rest_gyro_std_dps: 1.5
+rest_acc_std_g: 0.02
+# Estymator prędkości wyświetlanej (v_disp) – jak na Xiao
+estimator:
+  yaw_offset_deg: 0.0
+  zupt_ms: 200
+  zupt_gyro_dps: 4.0
+  zupt_acc_g: 0.04
+  slip_acc_thr: 3.0
+  slip_v_thr: 0.5
+  grip_hold_ms: 100
+  wheel_corr_tau_s: 0.5
+  brake_pct: -10
+  afront_tau_s: 0.03

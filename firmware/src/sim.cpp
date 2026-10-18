@@ -20,7 +20,8 @@ static bool     s_pins_pulled;
 static float    s_rpm, s_rpm_from, s_rpm_to;
 static uint32_t s_ramp_t0, s_ramp_us;
 static bool     s_ramping;
-static uint32_t s_next_edge_t, s_last_edge_t;
+static uint32_t s_t_base, s_last_edge_t;
+static double   s_t_rel, s_phase;   // czas od s_t_base [us], faza do następnego zbocza
 static uint8_t  s_seq_k;
 static bool     s_edges_on;
 static uint16_t s_thr_w;
@@ -63,22 +64,33 @@ static float rpm_at(uint32_t t) {
 
 void sim_poll(uint32_t now) {
   if (!s_active) return;
-  // zbocza
-  for (int guard = 0; guard < 64 && s_edges_on; guard++) {
-    if ((int32_t)(now - s_next_edge_t) < 0) break;
-    float r = rpm_at(s_next_edge_t);
+  // Zbocza: całkowanie fazy krokami ≤ 1 ms – poprawne także przy rampie
+  // od zera (sam okres z chwilowych obrotów dałby jedno bardzo długie zbocze).
+  for (int guard = 0; guard < 256 && s_edges_on; guard++) {
+    uint32_t t_cur = s_t_base + (uint32_t)s_t_rel;
+    float r = rpm_at(t_cur);
+    double rate = (double)r * EDGES_PER_REV / 60.0e6;  // zbocza / us
     if (r < 1.0f) {
       if (!s_ramping) {
         s_edges_on = false;
         break;
       }
-      s_next_edge_t += 1000;
+      if ((int32_t)(now - (t_cur + 1000)) < 0) break;
+      s_t_rel += 1000.0;
       continue;
     }
-    hall_inject_edge(s_next_edge_t, kSeq[s_seq_k][0], kSeq[s_seq_k][1]);
-    s_last_edge_t = s_next_edge_t;
-    s_seq_k = (s_seq_k + 1) % SEQ_LEN;
-    s_next_edge_t += (uint32_t)(60.0e6f / (r * EDGES_PER_REV));
+    double need = (1.0 - s_phase) / rate;
+    double step = need < 1000.0 ? need : 1000.0;
+    if ((int32_t)(now - (s_t_base + (uint32_t)(s_t_rel + step))) < 0) break;
+    s_t_rel += step;
+    s_phase += rate * step;
+    if (s_phase >= 1.0 - 1e-9) {
+      s_phase = 0.0;
+      uint32_t te = s_t_base + (uint32_t)(s_t_rel + 0.5);
+      hall_inject_edge(te, kSeq[s_seq_k][0], kSeq[s_seq_k][1]);
+      s_last_edge_t = te;
+      s_seq_k = (s_seq_k + 1) % SEQ_LEN;
+    }
   }
   // gaz 50 Hz
   if (s_thr_w) {
@@ -93,7 +105,9 @@ void sim_poll(uint32_t now) {
 static void start_edges(uint32_t now) {
   if (!s_edges_on) {
     s_edges_on = true;
-    s_next_edge_t = now;
+    s_t_base = now;
+    s_t_rel = 0.0;
+    s_phase = 0.0;
   }
 }
 
@@ -129,7 +143,12 @@ void sim_glitch(uint32_t width_us) {
   sim_poll(now);
   // Szpilka w połowie między zboczami symulacji (zachowana kolejność czasów)
   uint32_t t = now;
-  if (s_edges_on) t = s_last_edge_t + (s_next_edge_t - s_last_edge_t) / 2;
+  if (s_edges_on) {
+    float r = rpm_at(now);
+    uint32_t interval = r >= 1.0f ? (uint32_t)(60.0e6f / (r * EDGES_PER_REV)) : 100000;
+    t = s_last_edge_t + interval / 2;
+    if ((int32_t)(t - now) < 0) t = now;
+  }
   uint8_t cur = hall_line_level(0);
   hall_inject_edge(t, 0, cur ^ 1);
   hall_inject_edge(t + width_us, 0, cur);
