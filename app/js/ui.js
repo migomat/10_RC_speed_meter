@@ -1,0 +1,708 @@
+// Interfejs aplikacji: widoki, przepływ „Pobierz wszystko”, prędkościomierz,
+// lista startów, wykresy, porównanie, ustawienia, eksport/import.
+
+import { WebBluetoothTransport, DemoTransport, bleErrorMessage } from './transport.js';
+import { Device, BusyError } from './protocol.js';
+import { parseRun, parseHeader, toBase64, fromBase64, RF, fwVersionString } from './format.js';
+import { analyze, mergeSettings, DEFAULT_SETTINGS, METRIC_LABELS, interpAt } from './analysis.js';
+import * as db from './storage.js';
+import { syncedCharts, scatterChart, PALETTE } from './charts.js';
+
+const APP_VERSION = '1.0.0';
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '–' : v.toFixed(d).replace('.', ','));
+
+const state = {
+  transport: null,
+  device: null,
+  demo: false,
+  settings: mergeSettings(null),
+  analysisCache: new Map(),
+  partial: new Map(),          // seq → częściowo pobrane dane (wznawianie)
+  lastBatch: [],               // id startów z ostatniego pobrania (tag serii)
+  lastStatus: null,
+  live: { on: false, last: 0, data: null },
+  speedUnit: 'kmh',
+  currentRun: null,
+  charts: null,
+  cmpCharts: null,
+  wakeLock: null,
+  downloading: false,
+};
+
+// ------------------------------------------------------------------ narzędzia UI
+function toast(msg, ms = 2600) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.remove('hidden');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.add('hidden'), ms);
+}
+
+function show(el, on = true) { el.classList.toggle('hidden', !on); }
+
+function setChip(text, cls) {
+  const c = $('connChip');
+  c.textContent = text;
+  c.className = `chip ${cls}`;
+}
+
+async function wakeLock(on) {
+  try {
+    if (on && 'wakeLock' in navigator && !state.wakeLock) {
+      state.wakeLock = await navigator.wakeLock.request('screen');
+      state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+    } else if (!on && state.wakeLock) {
+      await state.wakeLock.release();
+      state.wakeLock = null;
+    }
+  } catch (e) { /* brak wsparcia / karta w tle */ }
+}
+
+// Przycisk wymagający drugiego dotknięcia (bez okien confirm())
+function armedButton(btn, label, action) {
+  btn.addEventListener('click', async () => {
+    if (!btn.classList.contains('armed')) {
+      btn.classList.add('armed');
+      const orig = btn.textContent;
+      btn.dataset.orig = orig;
+      btn.textContent = label;
+      setTimeout(() => { btn.classList.remove('armed'); btn.textContent = btn.dataset.orig; }, 3000);
+      return;
+    }
+    btn.classList.remove('armed');
+    btn.textContent = btn.dataset.orig;
+    await action();
+  });
+}
+
+// ------------------------------------------------------------------ nawigacja
+let currentView = 'connect';
+function goto(view) {
+  if (currentView === 'speed' && view !== 'speed') leaveSpeed();
+  currentView = view;
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${view}`));
+  document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === view ||
+    (view === 'run' && b.dataset.view === 'runs')));
+  window.scrollTo(0, 0);
+  if (view === 'runs') renderRunsList();
+  if (view === 'compare') renderCompare();
+  if (view === 'speed') enterSpeed();
+  if (view === 'settings') renderSettings();
+}
+
+// ------------------------------------------------------------------ połączenie
+async function connect(kind, opts = {}) {
+  $('connError').classList.add('hidden');
+  try {
+    if (state.transport) await disconnect();
+    const tr = kind === 'demo' ? new DemoTransport() : new WebBluetoothTransport();
+    setChip('łączenie…', 'busy');
+    await tr.connect(opts);
+    state.transport = tr;
+    state.demo = kind === 'demo';
+    state.device = new Device(tr);
+    state.device.onLive(onLive);
+    tr.onDisconnect(onDisconnected);
+    if (!state.demo) try { localStorage.setItem('x4f_paired', '1'); } catch (e) { /* */ }
+    setChip(tr.name, 'on');
+    show($('btnDisconnect'), true);
+    show($('demoTools'), state.demo);
+    $('connInfo').textContent = state.demo ? 'Tryb demo – wirtualne Xiao z syntetycznymi startami.' : `Połączono z ${tr.name}.`;
+    await state.device.setTime();
+    await refreshDevice();
+    if (currentView === 'speed') enterSpeed();
+  } catch (e) {
+    setChip('rozłączony', 'off');
+    const msg = kind === 'demo' ? `Demo: ${e.message}` : bleErrorMessage(e);
+    $('connError').textContent = msg;
+    show($('connError'), true);
+  }
+}
+
+async function disconnect() {
+  const tr = state.transport;
+  state.transport = null;
+  state.device = null;
+  if (tr) { try { await tr.disconnect(); } catch (e) { /* */ } }
+  onDisconnected();
+}
+
+function onDisconnected() {
+  setChip('rozłączony', 'off');
+  show($('btnDisconnect'), false);
+  show($('demoTools'), false);
+  $('btnDownload').disabled = true;
+  $('connInfo').textContent = 'Rozłączono.';
+  show($('devStatus'), false);
+  state.live.on = false;
+  $('liveToggle').checked = false;
+  if (state.downloading) $('dlText').textContent = 'Połączenie zerwane – pobieranie zostanie wznowione po ponownym połączeniu.';
+  state.transport = null;
+  state.device = null;
+}
+
+async function refreshDevice() {
+  const d = state.device;
+  if (!d) return;
+  const [info, st, runs] = [await d.info(), await d.status(), await d.list()];
+  state.lastStatus = st;
+  const box = $('devStatus');
+  box.innerHTML = '';
+  const rows = [
+    ['Firmware', `${info.fw} (format ${info.format}, halla: ${info.hall_lines} lin.)`],
+    ['Stan', st.state],
+    ['Neutrum gazu', st.neutral_learned ? `${st.neutral_us} µs` : 'uczenie…'],
+    ['Starty w pamięci', `${st.runs} (wolne sloty: ${st.free_slots})`],
+    ['Czas ustawiony', st.time_set ? 'tak' : 'nie'],
+  ];
+  for (const [k, v] of rows) box.insertAdjacentHTML('beforeend', `<span class="muted">${k}</span><b>${v}</b>`);
+  show(box, true);
+  $('dlInfo').textContent = runs.length ? `Do pobrania: ${runs.length} ${plural(runs.length, 'start', 'starty', 'startów')}.` : 'Brak nowych startów na urządzeniu.';
+  $('btnDownload').disabled = !runs.length;
+  const warn = $('dlWarn');
+  if (st.overwritten_unread > 0) {
+    warn.textContent = `Uwaga: ${st.overwritten_unread} ${plural(st.overwritten_unread, 'start został nadpisany', 'starty zostały nadpisane', 'startów zostało nadpisanych')} przed pobraniem (brak miejsca w pamięci Xiao).`;
+    show(warn, true);
+  } else show(warn, false);
+  return runs;
+}
+
+function plural(n, one, few, many) {
+  if (n === 1) return one;
+  const d = n % 10, h = n % 100;
+  return (d >= 2 && d <= 4 && (h < 12 || h > 14)) ? few : many;
+}
+
+// ------------------------------------------------------------------ pobieranie
+async function downloadAll() {
+  const d = state.device;
+  if (!d || state.downloading) return;
+  state.downloading = true;
+  $('btnDownload').disabled = true;
+  show($('tagBatch'), false);
+  const bar = $('dlProgress');
+  show(bar, true);
+  await wakeLock(true);
+  const batch = [];
+  let failed = null;
+  try {
+    await d.setTime();
+    const st = await d.status();
+    state.lastStatus = st;
+    const runs = await d.list();         // od najstarszego
+    const total = runs.reduce((a, r) => a + r.len, 0);
+    let doneBytes = 0;
+    for (let k = 0; k < runs.length; k++) {
+      const r = runs[k];
+      const label = `Start ${k + 1}/${runs.length} (seq ${r.seq})`;
+      const meta = { seq: r.seq, crc: r.crc, boot: r.boot };
+      const id = db.runId(meta);
+      if (await db.hasRun(id)) {
+        // już zapisany (np. DEL nie doszedł) – tylko kasowanie z Xiao
+        await d.del(r.seq);
+        doneBytes += r.len;
+        continue;
+      }
+      const partial = state.partial.get(id) || null;
+      let data;
+      try {
+        data = await d.download(r, {
+          partial,
+          onProgress: (got) => {
+            bar.firstElementChild.style.width = `${((doneBytes + got) / total) * 100}%`;
+            $('dlText').textContent = `${label}: ${Math.round(got / 1024)} / ${Math.round(r.len / 1024)} kB`;
+          },
+        });
+      } catch (e) {
+        if (e.partial && e.partial.length) state.partial.set(id, e.partial);
+        throw e;
+      }
+      state.partial.delete(id);
+      const h = parseRun(data).header;      // weryfikuje CRC i format
+      const rec = {
+        id, raw: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+        seq: r.seq, crc: r.crc, boot: r.boot, uptime_ms: r.uptime_ms, unix: h.unix_s,
+        approx_unix: approxUnix(h, st), downloaded_at: Date.now(), tag: '', note: '',
+        device: state.transport.name, flags: h.flags,
+      };
+      await db.putRun(rec);                 // czeka na transaction.oncomplete
+      await d.del(r.seq);                   // dopiero teraz kasowanie z Xiao
+      batch.push(id);
+      doneBytes += r.len;
+      bar.firstElementChild.style.width = `${(doneBytes / total) * 100}%`;
+    }
+    $('dlText').textContent = batch.length ? `Pobrano ${batch.length} ${plural(batch.length, 'start', 'starty', 'startów')}.` : 'Nic nowego do pobrania.';
+  } catch (e) {
+    failed = e;
+    const msg = e instanceof BusyError ? 'Urządzenie nagrywa/zapisuje – spróbuj za chwilę.' : e.message;
+    $('dlText').textContent = `Przerwano: ${msg}. Starty nie zostały skasowane z Xiao.`;
+  } finally {
+    state.downloading = false;
+    await wakeLock(false);
+    if (state.device) { try { await refreshDevice(); } catch (e) { /* */ } }
+  }
+  if (batch.length) {
+    state.lastBatch = batch;
+    await showTagBatch();
+  }
+  return failed;
+}
+
+// Start sprzed ustawienia czasu: przeliczenie z uptime, jeśli ten sam rozruch Xiao
+function approxUnix(h, st) {
+  if (h.unix_s) return h.unix_s;
+  if (st && st.boot === h.boot_count && st.uptime_ms >= h.uptime_ms) {
+    return Math.round(Date.now() / 1000 - (st.uptime_ms - h.uptime_ms) / 1000);
+  }
+  return 0;
+}
+
+async function showTagBatch() {
+  const box = $('tagBatch');
+  const chips = $('tagRecent');
+  chips.innerHTML = '';
+  for (const t of await db.recentTags()) {
+    const b = document.createElement('button');
+    b.textContent = t;
+    b.onclick = () => applyBatchTag(t);
+    chips.appendChild(b);
+  }
+  $('tagInput').value = '';
+  show(box, true);
+}
+
+async function applyBatchTag(tag) {
+  tag = tag.trim();
+  for (const id of state.lastBatch) await db.updateRun(id, { tag });
+  await db.pushRecentTag(tag);
+  show($('tagBatch'), false);
+  toast(tag ? `Tag „${tag}” przypisany do ${state.lastBatch.length} startów` : 'Pominięto tag');
+}
+
+// ------------------------------------------------------------------ LIVE / prędkościomierz
+function onLive(m) {
+  state.live.last = performance.now();
+  state.live.data = m;
+  const box = $('liveBox');
+  if (state.live.on && currentView === 'connect') {
+    box.innerHTML = [['v', `${fmt(m.v)} m/s`], ['v kół', `${fmt(m.v_front)} m/s`], ['obroty', `${m.rpm} rpm`],
+      ['gaz', `${m.thr} µs (${fmt(m.thr_pct, 0)} %)`], ['a', `${fmt(m.ax)} g`], ['stan', m.state]]
+      .map(([k, v]) => `<span class="muted">${k}</span><b>${v}</b>`).join('');
+  }
+  if (currentView === 'speed') renderSpeed(m);
+}
+
+function speedConv(v) { return state.speedUnit === 'kmh' ? v * 3.6 : v; }
+
+function renderSpeed(m) {
+  $('spdValue').textContent = fmt(speedConv(m.v), 1);
+  $('spdMax').textContent = fmt(speedConv(m.v_max), 1);
+  $('spdFront').textContent = fmt(speedConv(m.v_front), 1);
+  $('spdThr').textContent = `${fmt(m.thr_pct, 0)} %`;
+  $('spdState').textContent = m.state === 'RECORDING' ? '● nagrywanie' : '';
+  const s = $('spdSlip');
+  s.className = `slip ${m.slip ? 'bad' : 'ok'}`;
+  s.textContent = m.slip ? 'BUKSOWANIE' : 'przyczepność';
+}
+
+let speedTimer = null;
+async function enterSpeed() {
+  await wakeLock(true);
+  show($('spdHint'), !state.device);
+  if (state.device) { try { await state.device.live(true); state.live.on = true; } catch (e) { /* */ } }
+  clearInterval(speedTimer);
+  speedTimer = setInterval(() => {
+    const stale = !state.device || performance.now() - state.live.last > 300;
+    show($('spdNoSignal'), stale);
+    document.querySelector('.speedo').classList.toggle('stale', stale);
+  }, 100);
+}
+
+async function leaveSpeed() {
+  clearInterval(speedTimer);
+  if (!state.downloading) await wakeLock(false);
+  if (state.device && !$('liveToggle').checked) { try { await state.device.live(false); } catch (e) { /* */ } }
+}
+
+// ------------------------------------------------------------------ analiza (pamięć podręczna)
+function settingsKey() { return JSON.stringify(state.settings); }
+
+function getAnalysis(rec) {
+  const key = settingsKey();
+  const c = state.analysisCache.get(rec.id);
+  if (c && c.key === key) return c.res;
+  const run = parseRun(new Uint8Array(rec.raw), { verifyCrc: false });
+  const res = analyze(run, state.settings);
+  res.run = run;
+  state.analysisCache.set(rec.id, { key, res });
+  return res;
+}
+
+function runDate(rec) {
+  const u = rec.unix || rec.approx_unix;
+  if (!u) return `rozruch ${rec.boot}, ${Math.round(rec.uptime_ms / 1000)} s od włączenia`;
+  const d = new Date(u * 1000);
+  return (rec.unix ? '' : '≈ ') + d.toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'medium' });
+}
+
+function metricValue(k, v) {
+  if (v == null || Number.isNaN(v)) return '–';
+  if (k === 'peak_slip') return fmt(v * 100, 0);
+  if (k === 'esc_delay_s') return fmt(v * 1000, 0);
+  if (k.startsWith('t_') || k === 'peak_slip_t') return fmt(v, 3);
+  return fmt(v, 2);
+}
+
+// ------------------------------------------------------------------ lista startów
+async function renderRunsList() {
+  const all = (await db.allRuns()).sort((a, b) => (b.unix || b.approx_unix || b.downloaded_at / 1000) - (a.unix || a.approx_unix || a.downloaded_at / 1000));
+  const sel = $('runsFilter');
+  const cur = sel.value;
+  const tags = [...new Set(all.map((r) => r.tag).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">wszystkie tagi</option>' + tags.map((t) => `<option>${esc(t)}</option>`).join('');
+  sel.value = tags.includes(cur) ? cur : '';
+  const runs = sel.value ? all.filter((r) => r.tag === sel.value) : all;
+  $('runsCount').textContent = `${runs.length} ${plural(runs.length, 'start', 'starty', 'startów')}`;
+  const list = $('runsList');
+  list.innerHTML = '';
+  if (!runs.length) {
+    list.innerHTML = '<p class="muted center">Brak startów. Pobierz je z urządzenia (zakładka Połączenie) albo użyj trybu demo.</p>';
+    return;
+  }
+  for (const rec of runs) {
+    let m = {};
+    try { m = getAnalysis(rec).metrics; } catch (e) { m = {}; }
+    const b = document.createElement('button');
+    b.className = 'item';
+    b.innerHTML = `<div class="top"><b>${runDate(rec)}</b>${rec.tag ? `<span class="tag">${esc(rec.tag)}</span>` : ''}</div>
+      ${rec.note ? `<div class="muted small">${esc(rec.note)}</div>` : ''}
+      <div class="m"><span>a 0–0,3 s <b>${metricValue('a', m.a_long_0_300ms)}</b> m/s²</span>
+      <span>v 1 s <b>${metricValue('v', m.v_imu_1_0s)}</b> m/s</span>
+      <span>poślizg <b>${metricValue('peak_slip', m.peak_slip)}</b> %</span>
+      <span class="muted">seq ${rec.seq}</span></div>`;
+    b.onclick = () => openRun(rec.id);
+    list.appendChild(b);
+  }
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]); }
+
+// ------------------------------------------------------------------ szczegóły startu
+async function openRun(id) {
+  const rec = await db.getRun(id);
+  if (!rec) return;
+  state.currentRun = rec;
+  goto('run');
+  const res = getAnalysis(rec);
+  const h = res.header;
+  $('runTitle').textContent = `Start seq ${rec.seq}${rec.tag ? ' – ' + rec.tag : ''}`;
+  $('runMeta').textContent = `${runDate(rec)} · halla: ${h.hall_lines} lin. · ${h.n_samples} próbek, ${h.n_edges} zboczy · fw ${fwVersionString(h.fw_version)}` +
+    (h.flags & RF.SIMULATED ? ' · dane syntetyczne' : '');
+  const warns = [...res.warnings];
+  if (h.flags & RF.EDGES_TRUNCATED) warns.push('Bufor zboczy przepełniony – v_front z okresów obrotu.');
+  if (h.flags & RF.IMU_ERROR) warns.push('Błąd IMU podczas nagrania.');
+  $('runWarn').textContent = warns.join(' ');
+  show($('runWarn'), warns.length > 0);
+  $('runTag').value = rec.tag || '';
+  $('runNote').value = rec.note || '';
+  const chips = $('runTagRecent');
+  chips.innerHTML = '';
+  for (const t of await db.recentTags()) {
+    const b = document.createElement('button');
+    b.textContent = t;
+    b.onclick = () => { $('runTag').value = t; saveRunTag(); };
+    chips.appendChild(b);
+  }
+  renderRunCharts(res);
+  const mbox = $('runMetrics');
+  mbox.innerHTML = Object.entries(METRIC_LABELS).map(([k, [label, unit]]) =>
+    `<div class="metric"><div class="l">${label}</div><div class="v">${metricValue(k, res.metrics[k])} <span class="small muted">${unit}</span></div></div>`).join('');
+}
+
+function renderRunCharts(res) {
+  if (state.charts) state.charts.destroy();
+  const s = res.series;
+  const pct = (a) => Float64Array.from(a, (x) => x * 100);
+  state.charts = syncedCharts($('runCharts'), s.t, [
+    { label: 'gaz', unit: '%', height: 110, series: [{ label: 'gaz', values: s.throttle_pct, color: PALETTE[4] }] },
+    { label: 'v', unit: 'm/s', height: 190, series: [
+      { label: 'v_front', values: s.v_front, color: PALETTE[1] },
+      { label: 'v_imu', values: s.v_imu, color: PALETTE[0], width: 2 },
+      { label: 'v_disp', values: s.v_disp, color: PALETTE[2], dash: [6, 4] }] },
+    { label: 'a', unit: 'm/s²', height: 170, series: [
+      { label: 'a_front', values: s.a_front, color: PALETTE[1] },
+      { label: 'a_long', values: s.a_long, color: PALETTE[0], width: 2 }] },
+    { label: 'poślizg', unit: '%', height: 140, series: [{ label: 'poślizg', values: pct(s.slip), color: PALETTE[6] }] },
+    { label: 'pitch', unit: '°', height: 110, series: [{ label: 'pitch', values: s.pitch_deg, color: PALETTE[3] }] },
+  ]);
+  setRunRange('1');
+}
+
+function setRunRange(r) {
+  const res = state.currentRun && getAnalysis(state.currentRun);
+  if (!res || !state.charts) return;
+  const t0 = res.metrics.t_launch_s;
+  const t = res.series.t;
+  if (r === 'all') state.charts.setRange(t[0], t[t.length - 1]);
+  else state.charts.setRange(t0 - 0.05, t0 + Number(r));
+}
+
+async function saveRunTag() {
+  const rec = state.currentRun;
+  if (!rec) return;
+  const tag = $('runTag').value.trim();
+  await db.updateRun(rec.id, { tag, note: $('runNote').value });
+  rec.tag = tag;
+  await db.pushRecentTag(tag);
+  $('runTitle').textContent = `Start seq ${rec.seq}${tag ? ' – ' + tag : ''}`;
+  toast('Zapisano');
+}
+
+function runCsv(rec) {
+  const res = getAnalysis(rec);
+  const s = res.series;
+  const cols = ['t', 'throttle_pct', 'v_front', 'v_imu', 'v_disp', 'a_front', 'a_long', 'slip', 'spin', 'pitch_deg', 'd_front', 'd_imu'];
+  const lines = [cols.join(';')];
+  for (let i = 0; i < s.t.length; i++) lines.push(cols.map((c) => Number(s[c][i]).toFixed(5)).join(';'));
+  return lines.join('\n');
+}
+
+async function shareOrDownload(name, text, mime) {
+  const blob = new Blob([text], { type: mime });
+  const file = new File([blob], name, { type: mime });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: name }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+// ------------------------------------------------------------------ porównanie
+const cmpSel = { tags: new Set(), runs: new Set() };
+
+async function renderCompare() {
+  const all = await db.allRuns();
+  const tags = [...new Set(all.map((r) => r.tag || '(bez tagu)'))].sort();
+  const tbox = $('cmpTags');
+  tbox.innerHTML = '';
+  for (const t of tags) {
+    const b = document.createElement('button');
+    b.textContent = t;
+    b.classList.toggle('sel', cmpSel.tags.has(t));
+    b.onclick = () => { cmpSel.tags.has(t) ? cmpSel.tags.delete(t) : cmpSel.tags.add(t); renderCompare(); };
+    tbox.appendChild(b);
+  }
+  const rbox = $('cmpRuns');
+  rbox.innerHTML = '';
+  for (const r of all) {
+    const l = document.createElement('label');
+    l.innerHTML = `<input type="checkbox" ${cmpSel.runs.has(r.id) ? 'checked' : ''}> seq ${r.seq} · ${esc(r.tag || '–')} · ${runDate(r)}`;
+    l.querySelector('input').onchange = (e) => { e.target.checked ? cmpSel.runs.add(r.id) : cmpSel.runs.delete(r.id); renderCompare(); };
+    rbox.appendChild(l);
+  }
+  const chosen = all.filter((r) => cmpSel.runs.has(r.id) || cmpSel.tags.has(r.tag || '(bez tagu)'));
+  // nałożone v_imu(t − t0)
+  if (state.cmpCharts) { state.cmpCharts.destroy(); state.cmpCharts = null; }
+  const grid = Float64Array.from({ length: 1601 }, (_, i) => -0.2 + i * 0.002);
+  const series = chosen.slice(0, 16).map((r, i) => {
+    const res = getAnalysis(r);
+    const t0 = res.metrics.t_launch_s;
+    const v = Float64Array.from(grid, (tt) => { const y = interpAt(res.series.t, res.series.v_imu, t0 + tt); return Number.isNaN(y) ? null : y; });
+    return { label: `${r.tag || '–'} #${r.seq}`, values: v, color: PALETTE[i % PALETTE.length] };
+  });
+  if (series.length) state.cmpCharts = syncedCharts($('cmpChart'), grid, [{ label: 'v_imu', unit: 'm/s', height: 240, series }], { syncKey: 'cmp' });
+  else $('cmpChart').innerHTML = '<p class="muted">Nic nie wybrano.</p>';
+  // tabela tagów
+  const keys = ['a_long_0_300ms', 'a_long_0_1000ms', 'v_imu_1_0s', 't_2m', 'peak_slip', 'spin_integral', 'v_max'];
+  const byTag = new Map();
+  for (const r of all) {
+    const t = r.tag || '(bez tagu)';
+    if (cmpSel.tags.size && !cmpSel.tags.has(t)) continue;
+    if (!byTag.has(t)) byTag.set(t, []);
+    byTag.get(t).push(getAnalysis(r).metrics);
+  }
+  let html = '<table><tr><th>tag</th><th>n</th>' + keys.map((k) => `<th>${METRIC_LABELS[k][0]}</th>`).join('') + '</tr>';
+  for (const [t, ms] of byTag) {
+    html += `<tr><td>${esc(t)}</td><td>${ms.length}</td>` + keys.map((k) => {
+      const vals = ms.map((m) => m[k]).filter((v) => v != null && !Number.isNaN(v));
+      if (!vals.length) return '<td>–</td>';
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length);
+      return `<td>${metricValue(k, mean)} ± ${metricValue(k, sd)}</td>`;
+    }).join('') + '</tr>';
+  }
+  $('cmpTable').innerHTML = html + '</table>';
+  // wykres punktowy
+  const pts = all.map((r) => { const m = getAnalysis(r).metrics; return { x: m.peak_slip * 100, y: m.a_long_0_300ms, group: r.tag || '(bez tagu)' }; });
+  const leg = scatterChart($('cmpScatter'), pts, { xLabel: 'szczyt poślizgu [%]', yLabel: 'a 0–0,3 s [m/s²]' }) || [];
+  $('cmpLegend').innerHTML = leg.map((l) => `<span class="small" style="color:${l.color}">● ${esc(l.name)}</span>`).join(' ');
+}
+
+// ------------------------------------------------------------------ ustawienia
+const AXES = ['+x', '-x', '+y', '-y', '+z', '-z'];
+const EST_FIELDS = [
+  ['yaw_offset_deg', 'Kąt montażu w poziomie [°]'], ['zupt_ms', 'ZUPT – czas bezruchu [ms]'],
+  ['zupt_gyro_dps', 'ZUPT – maks. ω [dps]'], ['zupt_acc_g', 'ZUPT – maks. ||a|−1| [g]'],
+  ['slip_acc_thr', 'Próg |a_front−a_long| [m/s²]'], ['slip_v_thr', 'Próg |v_front−v| [m/s]'],
+  ['grip_hold_ms', 'Czas warunku przyczepności [ms]'], ['wheel_corr_tau_s', 'Stała korekty z kół [s]'],
+  ['brake_pct', 'Strefa hamowania gazu [%]'], ['afront_tau_s', 'Wygładzanie a_front [s]'],
+];
+
+function renderSettings() {
+  const s = state.settings;
+  $('setFdr').value = s.final_drive_ratio;
+  $('setTire').value = s.front_tire_diameter_mm;
+  for (const [id, key] of [['setAxF', 'forward'], ['setAxL', 'left'], ['setAxU', 'up']]) {
+    const el = $(id);
+    el.innerHTML = AXES.map((a) => `<option>${a}</option>`).join('');
+    el.value = s.imu_axes[key];
+  }
+  $('setLp').value = s.lowpass_hz;
+  $('setVmin').value = s.v_min_mps;
+  $('setEst').innerHTML = EST_FIELDS.map(([k, l]) => `<label>${l}<input data-est="${k}" type="number" step="any" inputmode="decimal" value="${s.estimator[k]}"></label>`).join('');
+  $('setTheme').value = localStorage.getItem('x4f_theme') || 'auto';
+  $('appVersion').textContent = `X4F Launch Logger ${APP_VERSION} · analiza zgodna z tools/rc_launch/analyze.py`;
+}
+
+async function saveSettings() {
+  const num = (id) => parseFloat($(id).value);
+  const s = mergeSettings(state.settings);
+  s.final_drive_ratio = num('setFdr');
+  s.front_tire_diameter_mm = num('setTire');
+  s.imu_axes = { forward: $('setAxF').value, left: $('setAxL').value, up: $('setAxU').value };
+  s.lowpass_hz = num('setLp');
+  s.v_min_mps = num('setVmin');
+  document.querySelectorAll('[data-est]').forEach((el) => { s.estimator[el.dataset.est] = parseFloat(el.value); });
+  const axesUsed = new Set(Object.values(s.imu_axes).map((a) => a[1]));
+  if (axesUsed.size !== 3) { $('setMsg').textContent = 'Każda oś auta musi mieć inną oś płytki.'; return; }
+  if (!(s.final_drive_ratio > 0 && s.front_tire_diameter_mm > 0 && s.lowpass_hz > 0)) { $('setMsg').textContent = 'Niepoprawne wartości.'; return; }
+  state.settings = s;
+  state.analysisCache.clear();
+  await db.kvSet('settings', s);
+  $('setMsg').textContent = 'Zapisano – wszystkie starty zostaną przeliczone.';
+}
+
+function applyTheme(t) {
+  if (t === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.setAttribute('data-theme', t);
+}
+
+// ------------------------------------------------------------------ eksport / import bazy
+async function exportDb() {
+  const runs = await db.allRuns();
+  const out = {
+    app: 'x4f-launch-logger', version: 1, exported_at: new Date().toISOString(), settings: state.settings,
+    recent_tags: await db.recentTags(),
+    runs: runs.map((r) => ({ ...r, raw: undefined, raw_b64: toBase64(new Uint8Array(r.raw)) })),
+  };
+  const name = `x4f_baza_${new Date().toISOString().slice(0, 10)}.json`;
+  await shareOrDownload(name, JSON.stringify(out), 'application/json');
+  $('dbMsg').textContent = `Wyeksportowano ${runs.length} startów.`;
+}
+
+async function importDb(file) {
+  try {
+    const obj = JSON.parse(await file.text());
+    if (obj.app !== 'x4f-launch-logger') throw new Error('To nie jest eksport X4F');
+    let n = 0, bad = 0;
+    for (const r of obj.runs || []) {
+      try {
+        const raw = fromBase64(r.raw_b64);
+        parseRun(raw);   // weryfikacja CRC
+        const rec = { ...r, raw: raw.buffer };
+        delete rec.raw_b64;
+        await db.putRun(rec);
+        n++;
+      } catch (e) { bad++; }
+    }
+    if (obj.settings) { state.settings = mergeSettings(obj.settings); await db.kvSet('settings', state.settings); state.analysisCache.clear(); }
+    for (const t of (obj.recent_tags || []).reverse()) await db.pushRecentTag(t);
+    $('dbMsg').textContent = `Zaimportowano ${n} startów${bad ? `, odrzucono ${bad} uszkodzonych` : ''}.`;
+    renderSettings();
+  } catch (e) {
+    $('dbMsg').textContent = `Błąd importu: ${e.message}`;
+  }
+}
+
+// ------------------------------------------------------------------ start aplikacji
+async function init() {
+  applyTheme(localStorage.getItem('x4f_theme') || 'auto');
+  const saved = await db.kvGet('settings');
+  if (saved) state.settings = mergeSettings(saved);
+
+  document.querySelectorAll('nav.tabs button').forEach((b) => { b.onclick = () => goto(b.dataset.view); });
+  $('btnConnect').onclick = () => connect('ble');
+  $('btnReconnect').onclick = () => connect('ble', { reconnect: true });
+  $('btnDemo').onclick = () => connect('demo');
+  $('btnDisconnect').onclick = () => disconnect();
+  $('btnDownload').onclick = () => downloadAll();
+  $('tagSave').onclick = () => applyBatchTag($('tagInput').value);
+  $('tagSkip').onclick = () => applyBatchTag('');
+  $('liveToggle').onchange = async (e) => {
+    state.live.on = e.target.checked;
+    if (state.device) { try { await state.device.live(e.target.checked); } catch (x) { toast(x.message); } }
+    if (!e.target.checked) $('liveBox').innerHTML = '';
+  };
+  $('btnDemoRefill').onclick = async () => { if (state.demo) { await state.transport.refill(); await refreshDevice(); } };
+  $('btnDemoDrop').onclick = () => { if (state.demo) state.transport.dropConnection(); };
+
+  $('spdUnit').onclick = () => {
+    state.speedUnit = state.speedUnit === 'kmh' ? 'ms' : 'kmh';
+    const u = state.speedUnit === 'kmh' ? 'km/h' : 'm/s';
+    $('spdUnit').textContent = u;
+    $('spdMaxUnit').textContent = u;
+    try { localStorage.setItem('x4f_unit', state.speedUnit); } catch (e) { /* */ }
+    if (state.live.data) renderSpeed(state.live.data);
+  };
+  try {
+    if (localStorage.getItem('x4f_unit') === 'ms') $('spdUnit').click();
+  } catch (e) { /* */ }
+  $('spdReset').onclick = async () => { if (state.device) { await state.device.vmaxReset(); toast('Wyzerowano prędkość maksymalną'); } };
+
+  $('runsFilter').onchange = () => renderRunsList();
+  $('runBack').onclick = () => goto('runs');
+  document.querySelectorAll('[data-range]').forEach((b) => { b.onclick = () => setRunRange(b.dataset.range); });
+  $('runTagSave').onclick = () => saveRunTag();
+  $('runNote').onchange = () => saveRunTag();
+  $('runExportCsv').onclick = () => {
+    const r = state.currentRun;
+    if (r) shareOrDownload(`x4f_seq${r.seq}${r.tag ? '_' + r.tag.replace(/\W+/g, '_') : ''}.csv`, runCsv(r), 'text/csv');
+  };
+  armedButton($('runDelete'), 'Na pewno usunąć?', async () => {
+    const r = state.currentRun;
+    if (!r) return;
+    await db.deleteRun(r.id);
+    state.analysisCache.delete(r.id);
+    toast('Usunięto start');
+    goto('runs');
+  });
+
+  $('setSave').onclick = () => saveSettings();
+  $('setDefaults').onclick = () => { state.settings = mergeSettings(DEFAULT_SETTINGS); renderSettings(); $('setMsg').textContent = 'Przywrócono domyślne – kliknij Zapisz.'; };
+  $('setTheme').onchange = (e) => { localStorage.setItem('x4f_theme', e.target.value); applyTheme(e.target.value); };
+  $('dbExport').onclick = () => exportDb();
+  $('dbImport').onchange = (e) => { if (e.target.files[0]) importDb(e.target.files[0]); e.target.value = ''; };
+
+  const bleOk = WebBluetoothTransport.available();
+  if (!bleOk) {
+    $('btnConnect').disabled = true;
+    $('connInfo').textContent = 'Web Bluetooth niedostępny w tej przeglądarce – dostępny jest tryb demo. Na telefonie użyj Chrome (HTTPS).';
+  } else if (navigator.bluetooth.getDevices) {
+    try { show($('btnReconnect'), localStorage.getItem('x4f_paired') === '1'); } catch (e) { /* */ }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && (currentView === 'speed' || state.downloading)) wakeLock(true);
+  });
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+  renderSettings();
+  if (location.hash === '#demo') connect('demo');
+}
+
+init();

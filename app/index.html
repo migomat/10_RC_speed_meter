@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>X4F Launch Logger</title>
+<meta name="description" content="Analiza startów samochodu RC Xray X4F – pobieranie przez Bluetooth z X4F-LOG">
+<meta name="theme-color" content="#1b2a3a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/uPlot.min.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">X4F <span>Launch Logger</span></div>
+  <div id="connChip" class="chip off">rozłączony</div>
+</header>
+
+<main>
+  <!-- ======================= Połączenie -->
+  <section id="view-connect" class="view active">
+    <div class="card">
+      <h2>Urządzenie</h2>
+      <p id="connInfo" class="muted">Nie połączono z X4F-LOG.</p>
+      <div id="devStatus" class="kv hidden"></div>
+      <div class="btnrow">
+        <button id="btnConnect" class="primary">Połącz</button>
+        <button id="btnReconnect" class="hidden">Połącz ponownie</button>
+        <button id="btnDemo">Tryb demo</button>
+        <button id="btnDisconnect" class="hidden">Rozłącz</button>
+      </div>
+      <p id="connError" class="error hidden"></p>
+    </div>
+
+    <div class="card">
+      <h2>Starty na urządzeniu</h2>
+      <p id="dlInfo" class="muted">Połącz się, aby zobaczyć listę.</p>
+      <p id="dlWarn" class="warn hidden"></p>
+      <button id="btnDownload" class="primary big" disabled>Pobierz wszystko</button>
+      <div id="dlProgress" class="progress hidden"><div></div></div>
+      <p id="dlText" class="muted"></p>
+      <div id="tagBatch" class="hidden">
+        <h3>Tag dla pobranej serii</h3>
+        <div id="tagRecent" class="chips"></div>
+        <div class="row"><input id="tagInput" placeholder="np. punch 3" autocomplete="off"><button id="tagSave" class="primary">Zapisz</button></div>
+        <button id="tagSkip" class="link">Pomiń</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Podgląd na żywo</h2>
+      <label class="switch"><input type="checkbox" id="liveToggle"> LIVE</label>
+      <div id="liveBox" class="kv"></div>
+    </div>
+
+    <div id="demoTools" class="card hidden">
+      <h2>Narzędzia demo</h2>
+      <div class="btnrow">
+        <button id="btnDemoRefill">Dodaj starty demo</button>
+        <button id="btnDemoDrop">Zerwij połączenie (test)</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= Prędkościomierz -->
+  <section id="view-speed" class="view">
+    <div class="speedo">
+      <div id="spdNoSignal" class="nosignal hidden">BRAK SYGNAŁU</div>
+      <div class="speed-value"><span id="spdValue">0,0</span></div>
+      <button id="spdUnit" class="unit">km/h</button>
+      <div class="speed-sub">
+        <div>maks. <b id="spdMax">0,0</b> <span id="spdMaxUnit">km/h</span></div>
+        <button id="spdReset">Zeruj maks.</button>
+      </div>
+      <div class="slipbar"><span id="spdSlip" class="slip ok">przyczepność</span></div>
+      <div class="speed-small"><span>koła: <b id="spdFront">0,0</b></span><span>gaz: <b id="spdThr">–</b></span><span id="spdState"></span></div>
+    </div>
+    <p id="spdHint" class="muted center">Połącz się z urządzeniem albo włącz tryb demo.</p>
+  </section>
+
+  <!-- ======================= Lista startów -->
+  <section id="view-runs" class="view">
+    <div class="card row">
+      <select id="runsFilter"><option value="">wszystkie tagi</option></select>
+      <span id="runsCount" class="muted"></span>
+    </div>
+    <div id="runsList" class="list"></div>
+  </section>
+
+  <!-- ======================= Start (szczegóły) -->
+  <section id="view-run" class="view">
+    <div class="card">
+      <button id="runBack" class="link">← Starty</button>
+      <h2 id="runTitle">Start</h2>
+      <p id="runMeta" class="muted"></p>
+      <p id="runWarn" class="warn hidden"></p>
+      <div class="btnrow">
+        <button data-range="0.5">0–0,5 s</button>
+        <button data-range="1">0–1 s</button>
+        <button data-range="all">całość</button>
+      </div>
+    </div>
+    <div id="runCharts" class="charts"></div>
+    <div class="card">
+      <h3>Metryki</h3>
+      <div id="runMetrics" class="metrics"></div>
+    </div>
+    <div class="card">
+      <h3>Tag i notatka</h3>
+      <div class="row"><input id="runTag" placeholder="tag"><button id="runTagSave">Zapisz</button></div>
+      <div id="runTagRecent" class="chips"></div>
+      <textarea id="runNote" rows="2" placeholder="notatka"></textarea>
+      <div class="btnrow">
+        <button id="runExportCsv">Eksport CSV</button>
+        <button id="runDelete" class="danger">Usuń start</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= Porównanie -->
+  <section id="view-compare" class="view">
+    <div class="card">
+      <h2>Porównanie</h2>
+      <p class="muted">Wybierz tagi albo pojedyncze starty.</p>
+      <div id="cmpTags" class="chips"></div>
+      <details><summary>Pojedyncze starty</summary><div id="cmpRuns" class="checklist"></div></details>
+    </div>
+    <div class="card"><h3>v_imu(t) od startu</h3><div id="cmpChart" class="charts"></div></div>
+    <div class="card"><h3>Średnie i rozrzut dla tagów</h3><div id="cmpTable" class="tablewrap"></div></div>
+    <div class="card">
+      <h3>Przyspieszenie 0–0,3 s vs szczyt poślizgu (wszystkie starty)</h3>
+      <canvas id="cmpScatter" class="scatter"></canvas>
+      <div id="cmpLegend" class="chips"></div>
+    </div>
+  </section>
+
+  <!-- ======================= Ustawienia -->
+  <section id="view-settings" class="view">
+    <div class="card">
+      <h2>Auto</h2>
+      <label>Przełożenie całkowite (FDR)<input id="setFdr" type="number" step="0.01" inputmode="decimal"></label>
+      <label>Średnica przedniej opony [mm]<input id="setTire" type="number" step="0.1" inputmode="decimal"></label>
+      <h3>Mapowanie osi IMU</h3>
+      <div class="grid3">
+        <label>do przodu<select id="setAxF"></select></label>
+        <label>w lewo<select id="setAxL"></select></label>
+        <label>w górę<select id="setAxU"></select></label>
+      </div>
+      <label>Filtr dolnoprzepustowy [Hz]<input id="setLp" type="number" step="1" inputmode="decimal"></label>
+      <label>v_min dla poślizgu [m/s]<input id="setVmin" type="number" step="0.05" inputmode="decimal"></label>
+      <details>
+        <summary>Estymator prędkości (v_disp)</summary>
+        <div id="setEst"></div>
+      </details>
+      <div class="btnrow"><button id="setSave" class="primary">Zapisz</button><button id="setDefaults">Domyślne</button></div>
+      <p id="setMsg" class="muted"></p>
+    </div>
+    <div class="card">
+      <h2>Wygląd</h2>
+      <select id="setTheme"><option value="auto">automatycznie</option><option value="light">jasny</option><option value="dark">ciemny</option></select>
+    </div>
+    <div class="card">
+      <h2>Kopia zapasowa</h2>
+      <div class="btnrow">
+        <button id="dbExport">Eksportuj bazę (JSON)</button>
+        <label class="button">Importuj bazę<input id="dbImport" type="file" accept=".json,application/json" hidden></label>
+      </div>
+      <p id="dbMsg" class="muted"></p>
+    </div>
+    <p class="muted center small" id="appVersion"></p>
+  </section>
+</main>
+
+<nav class="tabs">
+  <button data-view="connect" class="active"><span>⚡</span>Połączenie</button>
+  <button data-view="speed"><span>⏱</span>Prędkość</button>
+  <button data-view="runs"><span>☰</span>Starty</button>
+  <button data-view="compare"><span>⇆</span>Porównanie</button>
+  <button data-view="settings"><span>⚙</span>Ustawienia</button>
+</nav>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="vendor/uPlot.iife.min.js"></script>
+<script type="module" src="js/ui.js"></script>
+</body>
+</html>
