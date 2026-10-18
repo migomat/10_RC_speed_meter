@@ -15,6 +15,8 @@ struct LiveData {
   bool     zupt;
 };
 extern LiveData g_live;
+extern uint32_t g_stack_free_min;   // [B] najmniejszy zapas stosu zadania loop
+extern volatile uint32_t g_tick_overflows;
 
 bool ble_begin(void);           // konfiguracja SoftDevice – przed timebase/hall
 void links_poll(uint32_t now_ms);

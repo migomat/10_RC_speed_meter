@@ -27,6 +27,7 @@ static volatile uint16_t s_conn = BLE_CONN_HANDLE_INVALID;
 static volatile uint8_t  s_rx[RX_RING];
 static volatile uint16_t s_rx_head, s_rx_tail;
 static bool s_vmax_reset;
+static volatile uint16_t s_mtu = 23;
 
 static void rxd_cb(uint16_t conn, BLECharacteristic* chr, uint8_t* data, uint16_t len) {
   (void)conn; (void)chr;
@@ -38,10 +39,20 @@ static void rxd_cb(uint16_t conn, BLECharacteristic* chr, uint8_t* data, uint16_
   }
 }
 
+// BLEConnection::getMtu() potrafi zwrócić MTU zgłoszone przez klienta (np. 517
+// z Chrome/BlueZ), a nie wynegocjowane min(klient, BLE_MTU). Bez ograniczenia
+// pakiety były za długie (NRF_ERROR_DATA_SIZE) i przepełniały bufor.
+static uint16_t clamp_mtu(uint16_t m) {
+  if (m > BLE_MTU) m = BLE_MTU;
+  if (m < 23) m = 23;
+  return m;
+}
+
 static void connect_cb(uint16_t conn) {
   s_conn = conn;
   BLEConnection* c = Bluefruit.Connection(conn);
   if (c) {
+    s_mtu = clamp_mtu(c->getMtu());
     c->requestPHY(BLE_GAP_PHY_2MBPS);
     c->requestDataLengthUpdate();
     c->requestMtuExchange(BLE_MTU);
@@ -52,6 +63,7 @@ static void connect_cb(uint16_t conn) {
 static void disconnect_cb(uint16_t conn, uint8_t reason) {
   (void)conn; (void)reason;
   s_conn = BLE_CONN_HANDLE_INVALID;
+  s_mtu = 23;
 }
 
 bool ble_begin(void) {
@@ -104,21 +116,44 @@ struct Link {
 static Link s_usb = {false, false, {0}, 0};
 static Link s_ble = {true, false, {0}, 0};
 
+static uint32_t s_tx_pkts, s_tx_busy_waits, s_tx_errors, s_tx_last_err, s_tx_last_len;
+
+// Notyfikacje wprost przez SoftDevice (sd_ble_gatts_hvx). BLECharacteristic::
+// notify() czeka na semafor w obiekcie BLEConnection, który przy rozłączeniu
+// jest zwalniany – wyścig kończył się zawieszeniem. Tu przy braku bufora
+// (NRF_ERROR_RESOURCES) oddajemy procesor i sprawdzamy, czy połączenie trwa.
 static void ble_send_typed(uint8_t type, const uint8_t* data, uint32_t len) {
   if (!ble_connected() || !s_txd.notifyEnabled(s_conn)) return;
-  BLEConnection* c = Bluefruit.Connection(s_conn);
-  if (!c) return;
-  uint16_t payload = c->getMtu() - 3 - 1;
-  uint8_t pkt[BLE_MTU];
+  uint16_t payload = clamp_mtu(s_mtu) - 3 - 1;
+  static uint8_t pkt[BLE_MTU];  // statycznie – stos zadania loop ma tylko 4 KB
+  uint16_t handle = s_txd.handles().value_handle;
   while (len) {
     uint16_t n = len < payload ? len : payload;
     pkt[0] = type;
     memcpy(pkt + 1, data, n);
-    // notify() czeka na wolny bufor HVN (max 100 ms); ponawiamy przy błędzie
-    int tries = 0;
-    while (!s_txd.notify(s_conn, pkt, n + 1)) {
-      if (!ble_connected() || ++tries > 20) return;
+    uint16_t plen = n + 1;
+    ble_gatts_hvx_params_t hvx = {};
+    hvx.handle = handle;
+    hvx.type = BLE_GATT_HVX_NOTIFICATION;
+    hvx.p_len = &plen;
+    hvx.p_data = pkt;
+    uint32_t t0 = millis();
+    for (;;) {
+      uint16_t conn = s_conn;
+      if (conn == BLE_CONN_HANDLE_INVALID) return;
+      plen = n + 1;  // SoftDevice nadpisuje *p_len
+      uint32_t err = sd_ble_gatts_hvx(conn, &hvx);
+      if (err == NRF_SUCCESS) break;
+      if (err != NRF_ERROR_RESOURCES || millis() - t0 > 1000) {
+        s_tx_errors++;
+        s_tx_last_err = err;
+        s_tx_last_len = (uint32_t)(n + 1) | ((uint32_t)s_mtu << 16);
+        return;
+      }
+      s_tx_busy_waits++;
+      delay(1);  // kolejka HVN pełna – czekamy na wysłanie (zadanie BLE)
     }
+    s_tx_pkts++;
     data += n;
     len -= n;
   }
@@ -173,7 +208,10 @@ static void cmd_status(Link& l) {
            "\"throttle_us\":%u,\"runs\":%d,\"free_slots\":%d,\"overwritten_unread\":%lu,"
            "\"time_set\":%s,\"ram_run\":%s,\"imu_ok\":%s,\"flash_ok\":%s,\"imu_overruns\":%lu,"
            "\"imu_samples\":%lu,\"imu_misaligned\":%lu,\"hall_edges\":%lu,\"hall_glitches\":%lu,\"uptime_ms\":%lu,"
-           "\"boot\":%lu,\"last_save_ms\":%lu,\"last_crc_ms\":%lu,\"connected\":%s,\"sim\":%s}",
+           "\"boot\":%lu,\"last_save_ms\":%lu,\"last_crc_ms\":%lu,\"connected\":%s,\"sim\":%s,"
+           "\"mtu\":%u,\"ble_pkts\":%lu,\"ble_waits\":%lu,\"ble_err\":%lu,"
+           "\"reset_reason\":%lu,\"stack_free\":%lu,\"tick_overflows\":%lu,\"ble_last_err\":%lu,"
+           "\"ble_last_len\":%lu}",
            logger_state_name(), throttle_neutral_us(), throttle_neutral_learned() ? "true" : "false",
            throttle_signal_ok(now) ? "true" : "false", throttle_tick_width(now),
            flash_count_runs() + (logger_ram_run_available() ? 1 : 0), flash_count_free(),
@@ -185,7 +223,11 @@ static void cmd_status(Link& l) {
            (unsigned long)hall_glitch_count(), (unsigned long)millis(),
            (unsigned long)flash_boot_count(), (unsigned long)logger_last_save_ms(),
            (unsigned long)logger_last_crc_ms(), ble_connected() ? "true" : "false",
-           sim_active() ? "true" : "false");
+           sim_active() ? "true" : "false", s_mtu, (unsigned long)s_tx_pkts,
+           (unsigned long)s_tx_busy_waits, (unsigned long)s_tx_errors,
+           (unsigned long)readResetReason(), (unsigned long)g_stack_free_min,
+           (unsigned long)g_tick_overflows, (unsigned long)s_tx_last_err,
+           (unsigned long)s_tx_last_len);
   send_text(l, s_out);
 }
 
@@ -354,7 +396,13 @@ void links_poll(uint32_t now_ms) {
     s_rx_tail = (s_rx_tail + 1) % RX_RING;
     feed(s_ble, ch);
   }
-  if (!ble_connected()) s_ble.live = false;
+  if (!ble_connected()) {
+    s_ble.live = false;
+  } else {
+    // MTU po wymianie (zadanie BLE aktualizuje obiekt połączenia)
+    BLEConnection* c = Bluefruit.Connection(s_conn);
+    if (c) s_mtu = clamp_mtu(c->getMtu());
+  }
 
   static uint32_t last_live;
   if ((s_usb.live || s_ble.live) && now_ms - last_live >= 1000 / LIVE_RATE_HZ) {

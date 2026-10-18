@@ -26,14 +26,15 @@ struct Tick {
 #define TICK_RING 256   // 512 ms zapasu na zablokowaną pętlę
 static Tick s_ticks[TICK_RING];
 static volatile uint32_t s_tick_w, s_tick_r;
-static volatile uint32_t s_tick_overflows;
+volatile uint32_t g_tick_overflows;
+uint32_t g_stack_free_min = 0xFFFFFFFF;
 
 static void on_tick(uint32_t t) {
   HallSnapshot h;
   hall_tick_snapshot(t, &h);
   uint16_t thr = throttle_tick_width(t);
   if (s_tick_w - s_tick_r >= TICK_RING) {
-    s_tick_overflows++;
+    g_tick_overflows++;
     return;
   }
   Tick& k = s_ticks[s_tick_w % TICK_RING];
@@ -125,6 +126,10 @@ static void drain_ticks(uint32_t now) {
   }
 }
 
+// Błąd krytyczny (np. przepełnienie stosu) → reset zamiast zawieszenia.
+// Przyczynę widać po restarcie w STATUS.reset_reason (RESETREAS).
+extern "C" void HardFault_Handler(void) { NVIC_SystemReset(); }
+
 void setup() {
   Serial.begin(115200);
   led_begin();
@@ -164,4 +169,7 @@ void loop() {
   li.connected = ble_connected();
   li.unread_runs = flash_count_runs() > 0 || logger_ram_run_available();
   led_poll(li, ms);
+
+  uint32_t free_b = uxTaskGetStackHighWaterMark(nullptr) * 4;
+  if (free_b < g_stack_free_min) g_stack_free_min = free_b;
 }
