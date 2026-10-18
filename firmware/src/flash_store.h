@@ -45,7 +45,8 @@ bool     flash_read(int slot, uint32_t offset, void* buf, uint32_t len);
 bool     flash_mark_downloaded(uint32_t seq);
 const SlotInfo* flash_slot(int i);
 int      flash_count_runs(void);         // kompletne (niepobrane)
-int      flash_count_free(void);
+int      flash_count_free(void);         // bez startów (także czekające na kasowanie)
+int      flash_count_erased(void);       // skasowane i sprawdzone – gotowe do zapisu
 uint32_t flash_next_seq(void);
 uint32_t flash_boot_count(void);         // ten rozruch
 uint32_t flash_overwritten_unread(void);

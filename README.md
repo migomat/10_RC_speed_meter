@@ -75,7 +75,8 @@ Test lokalny: `python3 -m http.server 8765 --directory app`, potem
 | Wielkość | Wynik | Cel |
 |---|---|---|
 | IMU | 838 Hz, overrun = 0 przez 60 s, misaligned = 0; szum |a| 1,1 mg, ω 0,06–0,09 dps | 833 Hz, 0 |
-| Czas SAVING (start 1750 próbek + 1500 zboczy, ~55 kB) | 480–570 ms (CRC 18–20 ms) | < 1 s |
+| Czas SAVING – tryb 1 (1750 próbek + ~1500 zboczy, 55 kB) | 480–590 ms (CRC 18–20 ms) | < 1 s |
+| Czas SAVING – tryb 3 (1750 próbek + ~4500 zboczy, 67 kB) | 756 ms (CRC 25 ms) | < 1 s |
 | Pobieranie USB | 77 kB/s | – |
 | Pobieranie BLE (bleak, BlueZ, BT 4.2) | 28 kB/s, MTU 247 | ≥ 20 kB/s |
 | LIVE | 20 Hz | 20 Hz |
@@ -89,14 +90,14 @@ Budżet RAM: próbki 1750 × 28 B = 49 kB; log zboczy wymiarowany z `MAX_MOTOR_R
 
 | # | Kryterium | Status |
 |---|---|---|
-| 1 | Szkielet, oba tryby kompilują się | ✅ |
+| 1 | Szkielet, oba tryby kompilują się | ✅ (oba tryby wgrane i przetestowane na płytce) |
 | 2 | IMU 833 Hz bez gubienia, \|a\| ≈ 1 g | ✅ (60 s, 0 overrun) |
 | 3 | Gaz ±2 µs, uczenie neutrum | ✅ algorytm (SIM); ⏳ zgodność z symulatorem ESP32 – wymaga okablowania |
-| 4 | Hall ±0,5 % 500–30 000 rpm, szpilki, powrót do 0 | ✅ algorytm (SIM); ⏳ tor sprzętowy PPI – wymaga symulatora/auta |
+| 4 | Hall ±0,5 % 500–30 000 rpm, szpilki, powrót do 0 | ✅ algorytm w trybach 1 i 3, kierunek A→B→C (SIM); ⏳ tor sprzętowy GPIOTE/PPI – wymaga hall_sim/auta |
 | 5 | Logger: pre-trigger, liczba próbek, LED | ✅ (1750 próbek, trigger 250, odstęp 2000 µs) |
-| 6 | Flash: 20 startów → 16 + overwritten 4; zanik zasilania; DEL; SAVING < 1 s | ✅ (zanik zasilania symulowany resetem w trakcie zapisu – `SIM RESETAT`; test z odłączeniem LiPo do wykonania) |
+| 6 | Flash: 20 startów → 16 + overwritten 4; zanik zasilania; DEL (także DEL → natychmiastowy GET, seria pobierz+DEL); SAVING < 1 s | ✅ (zanik zasilania symulowany resetem w trakcie zapisu – `SIM RESETAT`; test z odłączeniem LiPo do wykonania) |
 | 7 | LIST/GET/DEL przez USB i BLE, wznawianie, przepustowość | ✅ |
-| 8 | Wektory testowe, testy analyze.py | ✅ 25 testów |
+| 8 | Wektory testowe, testy analyze.py | ✅ 25 testów Pythona (w tym estymator C vs Python), 13 testów JS; płytka: 38/38 (`fw_test.py`) |
 | 9 | Aplikacja – demo, analysis.js przechodzi wektory | ✅ (pobieranie, DEL po zapisie, tagi, wykresy, porównanie, zerwanie połączenia) |
 | 10 | Aplikacja z prawdziwym Xiao na Androidzie, offline | ⏳ wymaga telefonu i hostingu HTTPS |
 | 11–13 | Testy z autem, kalibracja, prędkościomierz na torze | ⏳ wymagają auta |

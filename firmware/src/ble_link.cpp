@@ -211,7 +211,7 @@ static void cmd_status(Link& l) {
            "\"boot\":%lu,\"last_save_ms\":%lu,\"last_crc_ms\":%lu,\"connected\":%s,\"sim\":%s,"
            "\"mtu\":%u,\"ble_pkts\":%lu,\"ble_waits\":%lu,\"ble_err\":%lu,"
            "\"reset_reason\":%lu,\"stack_free\":%lu,\"tick_overflows\":%lu,\"ble_last_err\":%lu,"
-           "\"ble_last_len\":%lu}",
+           "\"ble_last_len\":%lu,\"erased_slots\":%d,\"erasing\":%s}",
            logger_state_name(), throttle_neutral_us(), throttle_neutral_learned() ? "true" : "false",
            throttle_signal_ok(now) ? "true" : "false", throttle_tick_width(now),
            flash_count_runs() + (logger_ram_run_available() ? 1 : 0), flash_count_free(),
@@ -227,7 +227,7 @@ static void cmd_status(Link& l) {
            (unsigned long)s_tx_busy_waits, (unsigned long)s_tx_errors,
            (unsigned long)readResetReason(), (unsigned long)g_stack_free_min,
            (unsigned long)g_tick_overflows, (unsigned long)s_tx_last_err,
-           (unsigned long)s_tx_last_len);
+           (unsigned long)s_tx_last_len, flash_count_erased(), flash_busy() ? "true" : "false");
   send_text(l, s_out);
 }
 

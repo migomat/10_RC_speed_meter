@@ -35,10 +35,12 @@ static uint8_t read_status(void) {
 
 static bool wip(void) { return read_status() & 0x01; }
 
+// Czeka tylko na WIP. Nie rusza automatu kasowania – kolejny blok uruchamia
+// wyłącznie flash_poll() (inaczej GET/DEL w trakcie kasowania zrywał kasowanie
+// i slot zostawał w stanie „pobrany” na zawsze).
 static void wait_ready(void) {
   while (wip()) {
   }
-  s_erase_running = false;
 }
 
 static bool write_word(uint32_t addr, uint32_t v) {
@@ -328,6 +330,13 @@ const SlotInfo* flash_slot(int i) { return &s_slots[i]; }
 int flash_count_runs(void) {
   int n = 0;
   for (int i = 0; i < FLASH_NUM_SLOTS; i++) n += s_slots[i].state == SLOT_COMPLETE;
+  return n;
+}
+
+int flash_count_erased(void) {
+  int n = 0;
+  for (int i = 0; i < FLASH_NUM_SLOTS; i++)
+    n += s_slots[i].state == SLOT_FREE && s_slots[i].blank_ok && !s_slots[i].erase_pending;
   return n;
 }
 

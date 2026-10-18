@@ -59,25 +59,36 @@ export class Device {
     let off = 0;
     while (off < data.length) {
       if (!this.bin) {
-        // nagłówek bloku w pierwszej notyfikacji ramki
-        const head = data.subarray(off);
-        if (head.length < 20) return;
-        const dv = new DataView(head.buffer, head.byteOffset, 20);
+        // nagłówek bloku (20 B) może być podzielony między notyfikacje (MTU 23)
+        const head = this.binHead || new Uint8Array(0);
+        const take = Math.min(20 - head.length, data.length - off);
+        const h2 = new Uint8Array(head.length + take);
+        h2.set(head);
+        h2.set(data.subarray(off, off + take), head.length);
+        off += take;
+        if (h2.length < 20) { this.binHead = h2; return; }
+        this.binHead = null;
+        const dv = new DataView(h2.buffer, 0, 20);
         if (dv.getUint32(0, true) !== BLOCK_MAGIC) return;
         const len = dv.getUint32(12, true);
-        this.bin = { need: 20 + len, buf: new Uint8Array(20 + len), got: 0 };
+        this.bin = { need: 20 + len, buf: new Uint8Array(20 + len), got: 20 };
+        this.bin.buf.set(h2);
+        if (len === 0) { this._frameDone(); continue; }
+        continue;
       }
       const take = Math.min(this.bin.need - this.bin.got, data.length - off);
       this.bin.buf.set(data.subarray(off, off + take), this.bin.got);
       this.bin.got += take;
       off += take;
-      if (this.bin.got === this.bin.need) {
-        const fr = this.bin.buf;
-        this.bin = null;
-        const w = this.frameWaiters.shift();
-        if (w) w(fr); else this.frames.push(fr);
-      }
+      if (this.bin.got === this.bin.need) this._frameDone();
     }
+  }
+
+  _frameDone() {
+    const fr = this.bin.buf;
+    this.bin = null;
+    const w = this.frameWaiters.shift();
+    if (w) w(fr); else this.frames.push(fr);
   }
 
   _nextLine(timeoutMs) {
@@ -103,6 +114,7 @@ export class Device {
     this.lines = [];
     this.frames = [];
     this.bin = null;
+    this.binHead = null;
   }
 
   /** Komenda tekstowa → obiekt (JSON) albo tekst ("OK", "OK DEL n"). */

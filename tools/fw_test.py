@@ -226,12 +226,42 @@ def t_del(dev, a, port):
     time.sleep(0.3)
     st = dev.status()
     check("DEL → slot zwolniony", st["free_slots"] == free0 + 1, f"{free0} → {st['free_slots']}")
+    time.sleep(0.3)
+    check("DEL → slot skasowany", not dev.status()["erasing"])
     dev.command("REBOOT")
     dev.link.close()
     time.sleep(3)
     link, dev2 = connect(port, 15)
     check("po restarcie start nie wraca", seq not in [r["seq"] for r in dev2.list_runs()])
     return link, dev2
+
+
+def t_delget(dev, a):
+    """DEL, zaraz potem GET innego startu – kasowanie w tle musi się dokończyć."""
+    runs = dev.list_runs()
+    while len(runs) < 2:
+        learn_neutral(dev)
+        do_launch(dev, rpm=8000, ramp_ms=800)
+        runs = dev.list_runs()
+    time.sleep(0.5)
+    e0 = dev.status()["erased_slots"]
+    dev.delete(runs[0]["seq"])
+    dev.get_block(runs[1]["seq"], 0, 4096)
+    dev.get_block(runs[1]["seq"], 4096, 4096)
+    time.sleep(0.4)
+    st = dev.status()
+    check("DEL+GET → slot skasowany", st["erased_slots"] == e0 + 1 and not st["erasing"],
+          f"erased {e0} → {st['erased_slots']}, erasing={st['erasing']}")
+    # seria: pobierz i skasuj wszystkie (jak aplikacja)
+    runs = dev.list_runs()
+    e0 = dev.status()["erased_slots"]
+    for r in runs:
+        dev.download(r)
+        dev.delete(r["seq"])
+    time.sleep(0.5)
+    st = dev.status()
+    check(f"seria {len(runs)} × pobierz+DEL → wszystkie skasowane", st["erased_slots"] == e0 + len(runs),
+          f"erased {e0} → {st['erased_slots']}")
 
 
 def t_get(dev, a):
