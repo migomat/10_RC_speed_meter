@@ -10,7 +10,7 @@ firmware/      szkic Arduino (kod w firmware/src), rdzeń Seeed nRF52 (non-mbed)
 app/           PWA (czysty JS, uPlot lokalnie), testy: node --test app/test/
 tools/         rc_launch (Python): download/parse/analyze/plot/compare, testy: pytest
 test_vectors/  wspólne wektory testowe (generator: rc_launch.make_test_vectors)
-hall_sim/      symulator halla/gazu na ESP32 (opcjonalny)
+hall_sim/      symulator halla/gazu na ESP32 (opcjonalny), kompilacja: arduino-cli compile -b esp32:esp32:esp32 hall_sim
 docs/          format binarny i protokół
 ```
 
