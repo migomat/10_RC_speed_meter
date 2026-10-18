@@ -3,7 +3,7 @@
 Logger startów samochodu RC Xray X4F (napęd na przód) na XIAO nRF52840 Sense.
 Urządzenie tylko podsłuchuje czujnik halla silnika i sygnał gazu, nagrywa IMU
 i zapisuje starty we flash. Pobieranie odbywa się przez BLE do aplikacji PWA na Androidzie.
-Specyfikacja: `CLAUDE.md`. Formaty: `docs/FORMAT.md`, `docs/PROTOCOL.md`.
+Specyfikacja: `CLAUDE.md`. Okablowanie: `docs/WIRING.md`. Formaty: `docs/FORMAT.md`, `docs/PROTOCOL.md`.
 
 ```
 firmware/      szkic Arduino (kod w firmware/src), rdzeń Seeed nRF52 (non-mbed)
