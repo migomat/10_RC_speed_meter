@@ -31,7 +31,7 @@ flash P25Q16H (QSPI), dioda RGB (P0.26 R, P0.30 G, P0.06 B, aktywne niskim).
                           │            │               │
                     ┌─────┴────────────┴───────────────┴─────┐
                     │ D0               GND             D1(D2,D3)│  XIAO nRF52840 Sense
-                    │                                 [68k]→GND │  ← przy Xiao (tylko 5 V)
+                    │                                [150k]→GND │  ← przy Xiao (linia 3,8 V)
                     │ BAT+ ── LiPo 1S ── BAT−                   │
                     └──────────────────────────────────────────┘
 ```
@@ -41,8 +41,26 @@ czujników). Z kabla sensora lutujemy tylko linie halla – w trybie 1 to **jede
 
 ## Dzielnik dla każdej linii halla
 
-`HALL_PULLUP_V` – napięcie podciągania w ESC, **DO ZMIERZENIA multimetrem**
-(stan wysoki na linii halla przy podłączonym ESC, silnik nieruchomy, magnes tak, by linia była „1”).
+`HALL_PULLUP_V` – napięcie stanu wysokiego linii halla przy włączonym ESC.
+
+**Zmierzone (2026-10-19): 3,8 V** → dzielnik **47 kΩ + 150 kΩ** (niżej). Do potwierdzenia:
+przy powolnym obracaniu kołem linia przełącza się 3,8 V ↔ ~0 V (stan niski < 0,5 V)
+– inaczej mierzona żyła to zasilanie czujników, a nie linia halla.
+
+**ESC z linią halla 3,8 V (ten ESC):**
+
+```
+hall X ──[47k]──────────── przewód ────────┬──► Dx (Xiao)
+         (przy miejscu lutu,               [150k]
+          w koszulce)                       │
+                                           GND (Xiao)
+```
+
+Na pinie: 3,8 V · 150/197 ≈ **2,89 V** (próg „1” nRF52840 = 0,7 · 3,3 V ≈ 2,31 V,
+maks. 3,6 V; przy 4,2 V na linii → 3,2 V). Dzielnik 47k/68k dałby tylko 2,25 V –
+**poniżej progu**, nie używać. Zamiennik: 47k + 100k → 2,59 V (mniejszy zapas).
+
+Gdyby inny ESC miał inne napięcie – wartości dla innych przypadków:
 
 **ESC podciąga do 5 V:**
 

@@ -33,10 +33,11 @@
 #endif
 #define MAX_MOTOR_RPM       40000   // [rpm] do wymiarowania bufora zboczy
 
-// Napięcie podciągania linii halla w ESC – DO ZMIERZENIA multimetrem.
-// 5 → dzielnik 47k/68k, 3.3 → tylko 10k szeregowo. Firmware tego nie
-// używa, wartość tylko informacyjnie (wpisywana do nagłówka startu ×10).
-#define HALL_PULLUP_V_X10   50
+// Stan wysoki linii halla – zmierzony 2026-10-19: 3,8 V (do potwierdzenia, że
+// linia przełącza się 3,8 V ↔ ~0 V przy obracaniu kołem). Dzielnik 47k (przy
+// lucie) + 150k do masy → 2,89 V na pinie (próg „1” nRF52: 2,31 V, maks. 3,6 V).
+// Firmware tej wartości nie używa – tylko informacyjnie w nagłówku startu (×10).
+#define HALL_PULLUP_V_X10   38
 
 // ---------------------------------------------------------------- piny
 #define PIN_THROTTLE        D0
