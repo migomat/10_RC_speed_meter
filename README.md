@@ -121,6 +121,18 @@ Budżet RAM: próbki 1750 × 28 B = 49 kB; log zboczy wymiarowany z `MAX_MOTOR_R
 * **Estymator** (`v_disp`): reguła „lub warunek przyspieszeń trwa > 100 ms” sprawia, że przy kołach
   w powietrzu kręcących się ze *stałą* prędkością wskazanie po ~0,1 s dochodzi do prędkości kół.
   Na `v_imu` i poślizg to nie wpływa. W trakcie buksowania (koła przyspieszają) wskazanie nie skacze.
+* **Wyzwalanie (2026-10-19, po testach w salonie)**: z 32 nagrań ~18 było manewrowaniem (mały gaz,
+  nawroty przód/tył). Teraz próg 60 % (`TRIGGER_THROTTLE_PCT`) i uzbrojenie tylko po postoju: gaz
+  w neutrum (|gaz| < `ARM_NEUTRAL_PCT`) i brak zboczy halla przez `ARM_REST_MS` = 300 ms; próg trzeba
+  przekroczyć w ciągu `LAUNCH_WINDOW_MS` = 700 ms od zejścia z postoju. `PRETRIGGER_MS` = 1000 ms,
+  żeby wolniejsze wciśnięcie gazu i spoczynek zmieściły się w nagraniu (2000 próbek).
+* **Drgania wentylatora ESC**: na postoju oś pionowa akcelerometru drga ±0,05 g (~180 Hz, aliasy ~18 Hz).
+  Spoczynek w analizie liczony na sygnałach po filtrze `lowpass_hz`, próg 0,06 g; ZUPT na |a|, |ω|
+  po filtrze IIR (`ZUPT_LPF_TAU_S` = 0,1 s), próg 0,06 g – fałszywy ZUPT w ruchu blokuje wymóg braku zboczy halla.
+* **BLE nie blokuje pomiaru**: przy słabym zasięgu wysyłanie mogło zatrzymać pętlę główną do 1 s
+  (zgubione próbki IMU, luki w nagraniu – widoczne w startach z salonu). `LIVE` jest porzucany przy
+  pełnej kolejce (`ble_dropped` w STATUS), a w czasie czekania na bufor (GET) pętla dalej czyta IMU
+  i takty. Moc nadawania +8 dBm (`BLE_TX_POWER_DBM`), PHY w `BLE_PHY_2M`.
 * Komendy `SIM …`, `REBOOT`, `DBG` – tylko USB, do testów na biurku.
 
 ## Do zrobienia przy aucie

@@ -57,9 +57,15 @@
 // ---------------------------------------------------------------- logger
 #define SAMPLE_RATE_HZ      500
 #define SAMPLE_PERIOD_US    (1000000 / SAMPLE_RATE_HZ)
-#define PRETRIGGER_MS       500
+#define PRETRIGGER_MS       1000   // [ms] mieści spoczynek + wolniejsze wciśnięcie gazu
 #define POSTTRIGGER_MS      3000
-#define TRIGGER_THROTTLE_PCT 20     // [% zakresu do przodu od neutrum]
+#define TRIGGER_THROTTLE_PCT 60     // [% zakresu do przodu od neutrum]
+// Uzbrojenie tylko po postoju: gaz w neutrum i brak zboczy halla przez ARM_REST_MS.
+// Próg trzeba przekroczyć w ciągu LAUNCH_WINDOW_MS od zejścia z postoju – manewrowanie
+// (mały gaz, nawroty przód/tył) nie wyzwala nagrania.
+#define ARM_NEUTRAL_PCT     10      // [%] |gaz| poniżej = neutrum
+#define ARM_REST_MS         300     // [ms]
+#define LAUNCH_WINDOW_MS    700     // [ms]
 
 #define PRE_SAMPLES         (PRETRIGGER_MS * SAMPLE_RATE_HZ / 1000)
 #define POST_SAMPLES        (POSTTRIGGER_MS * SAMPLE_RATE_HZ / 1000)
@@ -99,7 +105,8 @@
 #define IMU_YAW_OFFSET_DEG      0.0f    // [deg] kąt montażu płytki w poziomie
 #define ZUPT_MS                 200     // [ms] czas bezruchu do zerowania
 #define ZUPT_GYRO_DPS           4.0f    // [dps] maks. |ω| (po odjęciu biasu) w bezruchu
-#define ZUPT_ACC_G              0.04f   // [g] maks. ||a| − 1 g| w bezruchu
+#define ZUPT_ACC_G              0.06f   // [g] maks. ||a|_f − 1 g| w bezruchu (po filtrze)
+#define ZUPT_LPF_TAU_S          0.1f    // [s] filtr |a|, |ω| przed progami ZUPT (drgania wentylatora ESC)
 #define SLIP_ACC_THR            3.0f    // [m/s²] |a_front − a_long| = brak buksowania
 #define SLIP_V_THR              0.5f    // [m/s] |v_front − v| = brak buksowania
 #define GRIP_HOLD_MS            100     // [ms] jak długo warunek przyspieszeń → korekta
@@ -111,6 +118,8 @@
 // ---------------------------------------------------------------- BLE
 #define BLE_NAME            "X4F-LOG"
 #define BLE_MTU             247
+#define BLE_TX_POWER_DBM    8       // [dBm] maks. dla nRF52840 (zasięg w aucie)
+#define BLE_PHY_2M          1       // 1 = PHY 2M (szybsze pobieranie), 0 = 1M (ok. 3 dB lepszy zasięg)
 
 // ---------------------------------------------------------------- format
 #define RUN_FORMAT_VERSION  1

@@ -8,20 +8,21 @@ export const DEFAULT_EST_PARAMS = {
   yaw_offset_deg: 0.0,
   zupt_ms: 200,
   zupt_gyro_dps: 4.0,
-  zupt_acc_g: 0.04,
+  zupt_acc_g: 0.06,
   slip_acc_thr: 3.0,
   slip_v_thr: 0.5,
   grip_hold_ms: 100,
   wheel_corr_tau_s: 0.5,
   brake_pct: -10,
   afront_tau_s: 0.03,
+  zupt_lpf_tau_s: 0.1,
 };
 
 export function estInit() {
   return {
     v: 0, v_max: 0, pitch_rad: 0, a_ref_g: 0, gbias: [0, 0, 0],
     still_t: 0, still_sum_a: 0, still_sum_g: [0, 0, 0], still_n: 0,
-    vf_prev: 0, a_front_f: 0, a_long_f: 0, a_long: 0, grip_t: 0,
+    vf_prev: 0, a_front_f: 0, a_long_f: 0, a_long: 0, amag_f: 0, gmag_f: 0, grip_t: 0,
     spinning: false, zupt: false, first: true,
   };
 }
@@ -37,7 +38,14 @@ export function estStep(s, p, dt, aFwd, aLeft, aUp, gFwd, gLeft, gUp, vFront, ha
   const gx = gFwd - s.gbias[0], gy = gLeft - s.gbias[1], gz = gUp - s.gbias[2];
   const gmag = Math.sqrt(gx * gx + gy * gy + gz * gz);
   const amag = Math.sqrt(af * af + al * al + au * au);
-  const still = !!hallStopped && gmag < p.zupt_gyro_dps && Math.abs(amag - 1.0) < p.zupt_acc_g;
+  if (s.first) {
+    s.amag_f = amag; s.gmag_f = gmag;
+  } else {
+    const k = dt / (p.zupt_lpf_tau_s + dt);
+    s.amag_f += k * (amag - s.amag_f);
+    s.gmag_f += k * (gmag - s.gmag_f);
+  }
+  const still = !!hallStopped && s.gmag_f < p.zupt_gyro_dps && Math.abs(s.amag_f - 1.0) < p.zupt_acc_g;
   if (still) {
     s.still_t += dt;
     s.still_n += 1;

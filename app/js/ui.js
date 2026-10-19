@@ -551,6 +551,7 @@ const EST_FIELDS = [
   ['slip_acc_thr', 'Próg |a_front−a_long| [m/s²]'], ['slip_v_thr', 'Próg |v_front−v| [m/s]'],
   ['grip_hold_ms', 'Czas warunku przyczepności [ms]'], ['wheel_corr_tau_s', 'Stała korekty z kół [s]'],
   ['brake_pct', 'Strefa hamowania gazu [%]'], ['afront_tau_s', 'Wygładzanie a_front [s]'],
+  ['zupt_lpf_tau_s', 'Filtr bezruchu ZUPT [s]'],
 ];
 
 function renderSettings() {

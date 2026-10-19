@@ -13,16 +13,17 @@ lowpass_hz: 25
 v_min_mps: 0.3
 # Wykrywanie spoczynku przed startem (bias IMU)
 rest_gyro_std_dps: 1.5
-rest_acc_std_g: 0.02
+rest_acc_std_g: 0.06        # [g] po filtrze lowpass_hz (drgania wentylatora ESC)
 # Estymator prędkości wyświetlanej (v_disp) – jak na Xiao
 estimator:
   yaw_offset_deg: 0.0
   zupt_ms: 200
   zupt_gyro_dps: 4.0
-  zupt_acc_g: 0.04
+  zupt_acc_g: 0.06
   slip_acc_thr: 3.0
   slip_v_thr: 0.5
   grip_hold_ms: 100
   wheel_corr_tau_s: 0.5
   brake_pct: -10
   afront_tau_s: 0.03
+  zupt_lpf_tau_s: 0.1     # [s] filtr |a|, |ω| przed progami ZUPT (drgania wentylatora ESC)

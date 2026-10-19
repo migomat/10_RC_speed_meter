@@ -22,3 +22,5 @@ bool ble_begin(void);           // konfiguracja SoftDevice – przed timebase/ha
 void links_poll(uint32_t now_ms);
 bool ble_connected(void);
 bool vmax_reset_requested(void);
+// Wołane w trakcie czekania na bufor BLE (odczyt IMU, takty) – pomiar nie staje
+void ble_set_wait_hook(void (*fn)(void));

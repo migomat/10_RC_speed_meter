@@ -23,7 +23,7 @@ u32 magic 0x42463458 ("X4FB") | u32 seq | u32 offset | u32 len | u32 crc32(dane)
 | Komenda | Odpowiedź |
 |---|---|
 | `INFO` | `{"fw","format","proto","hall_lines","pole_pairs","edges_per_rev","slot_size","slots","sample_rate","get_block_max","max_samples","max_edges","jedec","name"}` |
-| `STATUS` | `{"state","neutral_us","neutral_learned","throttle_ok","throttle_us","runs","free_slots","overwritten_unread","time_set","ram_run","imu_ok","flash_ok","imu_overruns",…}` |
+| `STATUS` | `{"state","neutral_us","neutral_learned","throttle_ok","throttle_us","runs","free_slots","overwritten_unread","time_set","ram_run","imu_ok","flash_ok","imu_overruns",…,"ble_dropped","hall_pins","armed"}` – `hall_pins`: bieżący stan pinów halla (bity A\|B<<1\|C<<2, diagnostyka okablowania), `armed`: postój zaliczony, wyzwolenie możliwe |
 | `TIME <unix_s>` | `OK` |
 | `LIST` | `{"runs":[{"seq","len","crc","unix","boot","uptime_ms"[,"ram":true]}…]}` od najstarszego |
 | `GET <seq> <offset> <len>` | ramka binarna; `len ≤ 4096` |

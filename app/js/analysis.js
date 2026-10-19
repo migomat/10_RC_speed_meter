@@ -12,13 +12,25 @@ export const DEFAULT_SETTINGS = {
   lowpass_hz: 25,
   v_min_mps: 0.3,
   rest_gyro_std_dps: 1.5,
-  rest_acc_std_g: 0.02,
+  rest_acc_std_g: 0.06,   // po filtrze lowpass_hz (drgania wentylatora ESC ~0,03–0,05 g)
   estimator: { ...DEFAULT_EST_PARAMS },
 };
+
+// Zmienione wartości domyślne: zapisane ustawienie równe staremu domyślnemu → nowe.
+const SETTINGS_MIGRATIONS = [
+  [['rest_acc_std_g'], 0.02, 0.06],
+  [['estimator', 'zupt_acc_g'], 0.04, 0.06],
+];
 
 export function mergeSettings(user) {
   const s = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
   if (!user) return s;
+  user = JSON.parse(JSON.stringify(user));
+  for (const [path, oldV, newV] of SETTINGS_MIGRATIONS) {
+    const o = path.length > 1 ? user[path[0]] : user;
+    const k = path[path.length - 1];
+    if (o && o[k] === oldV) o[k] = newV;
+  }
   for (const [k, v] of Object.entries(user)) {
     if (v && typeof v === 'object' && !Array.isArray(v) && typeof s[k] === 'object') Object.assign(s[k], v);
     else if (v !== undefined && v !== null) s[k] = v;
@@ -188,8 +200,11 @@ export function analyze(run, settings) {
   const std = (x) => { const m = mean(x); let s = 0; for (let i = 0; i < restEnd; i++) s += (x[i] - m) ** 2; return Math.sqrt(s / restEnd); };
   const amag = new Float64Array(n);
   for (let i = 0; i < n; i++) amag[i] = Math.sqrt(aFwd[i] ** 2 + aLeft[i] ** 2 + aUp[i] ** 2);
-  const atRest = Math.max(std(gFwd), std(gLeft), std(gUp)) < cfg.rest_gyro_std_dps &&
-    std(amag) < cfg.rest_acc_std_g && edges[restEnd - 1] === edges[0];
+  // rozrzut po filtrze lowpass_hz (tylko okno spoczynku) – drgania wentylatora
+  // ESC (~180 Hz) nie mogą udawać ruchu auta
+  const lp = (x) => filtfiltButter2(x.subarray(0, restEnd), cfg.lowpass_hz, fs);
+  const atRest = Math.max(std(lp(gFwd)), std(lp(gLeft)), std(lp(gUp))) < cfg.rest_gyro_std_dps &&
+    std(lp(amag)) < cfg.rest_acc_std_g && edges[restEnd - 1] === edges[0];
   if (!atRest) warnings.push('auto nie stało przed startem – bias niepewny');
   const aRef = mean(aFwd);
   const gbLeft = mean(gLeft);

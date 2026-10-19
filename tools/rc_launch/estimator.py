@@ -14,13 +14,14 @@ DEFAULT_PARAMS = dict(
     yaw_offset_deg=0.0,
     zupt_ms=200.0,
     zupt_gyro_dps=4.0,
-    zupt_acc_g=0.04,
+    zupt_acc_g=0.06,
     slip_acc_thr=3.0,
     slip_v_thr=0.5,
     grip_hold_ms=100.0,
     wheel_corr_tau_s=0.5,
     brake_pct=-10.0,
     afront_tau_s=0.03,
+    zupt_lpf_tau_s=0.1,
 )
 
 
@@ -39,6 +40,8 @@ class EstState:
     a_front_f: float = 0.0
     a_long_f: float = 0.0
     a_long: float = 0.0
+    amag_f: float = 0.0
+    gmag_f: float = 0.0
     grip_t: float = 0.0
     spinning: bool = False
     zupt: bool = False
@@ -60,7 +63,14 @@ def est_step(s: EstState, p: dict, dt, a_fwd, a_left, a_up, g_fwd, g_left, g_up,
     gz = g_up - s.gbias_dps[2]
     gmag = math.sqrt(gx * gx + gy * gy + gz * gz)
     amag = math.sqrt(af * af + al * al + au * au)
-    still = bool(hall_stopped) and gmag < p["zupt_gyro_dps"] and abs(amag - 1.0) < p["zupt_acc_g"]
+    if s.first:
+        s.amag_f = amag
+        s.gmag_f = gmag
+    else:
+        k = dt / (p["zupt_lpf_tau_s"] + dt)
+        s.amag_f += k * (amag - s.amag_f)
+        s.gmag_f += k * (gmag - s.gmag_f)
+    still = bool(hall_stopped) and s.gmag_f < p["zupt_gyro_dps"] and abs(s.amag_f - 1.0) < p["zupt_acc_g"]
     if still:
         s.still_t += dt
         s.still_n += 1

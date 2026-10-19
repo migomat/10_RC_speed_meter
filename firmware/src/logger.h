@@ -14,6 +14,7 @@ void        logger_poll(void);            // postęp SAVING (pętla główna)
 LogState    logger_state(void);
 const char* logger_state_name(void);
 bool        logger_busy(void);            // RECORDING albo SAVING
+bool        logger_armed(void);           // postój zaliczony – wyzwolenie możliwe
 void        logger_arm(void);             // ERROR → IDLE
 void        logger_force_trigger(void);   // SIM / testy
 void        logger_set_sim_flag(bool on);

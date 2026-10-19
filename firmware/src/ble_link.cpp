@@ -53,7 +53,7 @@ static void connect_cb(uint16_t conn) {
   BLEConnection* c = Bluefruit.Connection(conn);
   if (c) {
     s_mtu = clamp_mtu(c->getMtu());
-    c->requestPHY(BLE_GAP_PHY_2MBPS);
+    c->requestPHY(BLE_PHY_2M ? BLE_GAP_PHY_2MBPS : BLE_GAP_PHY_1MBPS);
     c->requestDataLengthUpdate();
     c->requestMtuExchange(BLE_MTU);
     c->requestConnectionParameter(6);  // 7,5 ms
@@ -70,7 +70,7 @@ bool ble_begin(void) {
   Bluefruit.configPrphConn(BLE_MTU, 100, 8, BLE_GATTC_WRITE_CMD_TX_QUEUE_SIZE_DEFAULT);
   if (!Bluefruit.begin(1, 0)) return false;
   Bluefruit.setName(BLE_NAME);
-  Bluefruit.setTxPower(4);
+  Bluefruit.setTxPower(BLE_TX_POWER_DBM);
   Bluefruit.autoConnLed(false);
   Bluefruit.Periph.setConnectCallback(connect_cb);
   Bluefruit.Periph.setDisconnectCallback(disconnect_cb);
@@ -116,14 +116,21 @@ struct Link {
 static Link s_usb = {false, false, {0}, 0};
 static Link s_ble = {true, false, {0}, 0};
 
-static uint32_t s_tx_pkts, s_tx_busy_waits, s_tx_errors, s_tx_last_err, s_tx_last_len;
+static uint32_t s_tx_pkts, s_tx_busy_waits, s_tx_errors, s_tx_last_err, s_tx_last_len, s_tx_dropped;
+static void (*s_wait_hook)(void);
+
+void ble_set_wait_hook(void (*fn)(void)) { s_wait_hook = fn; }
 
 // Notyfikacje wprost przez SoftDevice (sd_ble_gatts_hvx). BLECharacteristic::
 // notify() czeka na semafor w obiekcie BLEConnection, który przy rozłączeniu
 // jest zwalniany – wyścig kończył się zawieszeniem. Tu przy braku bufora
 // (NRF_ERROR_RESOURCES) oddajemy procesor i sprawdzamy, czy połączenie trwa.
-static void ble_send_typed(uint8_t type, const uint8_t* data, uint32_t len) {
-  if (!ble_connected() || !s_txd.notifyEnabled(s_conn)) return;
+// W trakcie czekania wywoływany jest s_wait_hook (odczyt IMU, takty próbek) –
+// słaby zasięg nie może zatrzymać pomiaru. droppable: przy pełnej kolejce już
+// przy pierwszym pakiecie wiadomość jest porzucana (LIVE) – nic nie wysłano,
+// więc odbiorca nie dostaje uciętej linii.
+static bool ble_send_typed(uint8_t type, const uint8_t* data, uint32_t len, bool droppable = false) {
+  if (!ble_connected() || !s_txd.notifyEnabled(s_conn)) return false;
   uint16_t payload = clamp_mtu(s_mtu) - 3 - 1;
   static uint8_t pkt[BLE_MTU];  // statycznie – stos zadania loop ma tylko 4 KB
   uint16_t handle = s_txd.handles().value_handle;
@@ -140,7 +147,7 @@ static void ble_send_typed(uint8_t type, const uint8_t* data, uint32_t len) {
     uint32_t t0 = millis();
     for (;;) {
       uint16_t conn = s_conn;
-      if (conn == BLE_CONN_HANDLE_INVALID) return;
+      if (conn == BLE_CONN_HANDLE_INVALID) return false;
       plen = n + 1;  // SoftDevice nadpisuje *p_len
       uint32_t err = sd_ble_gatts_hvx(conn, &hvx);
       if (err == NRF_SUCCESS) break;
@@ -148,15 +155,22 @@ static void ble_send_typed(uint8_t type, const uint8_t* data, uint32_t len) {
         s_tx_errors++;
         s_tx_last_err = err;
         s_tx_last_len = (uint32_t)(n + 1) | ((uint32_t)s_mtu << 16);
-        return;
+        return false;
+      }
+      if (droppable) {
+        s_tx_dropped++;
+        return false;
       }
       s_tx_busy_waits++;
+      if (s_wait_hook) s_wait_hook();
       delay(1);  // kolejka HVN pełna – czekamy na wysłanie (zadanie BLE)
     }
+    droppable = false;  // część wiadomości wysłana – reszta musi dojść
     s_tx_pkts++;
     data += n;
     len -= n;
   }
+  return true;
 }
 
 static void send_text(Link& l, const char* s) {
@@ -211,7 +225,8 @@ static void cmd_status(Link& l) {
            "\"boot\":%lu,\"last_save_ms\":%lu,\"last_crc_ms\":%lu,\"connected\":%s,\"sim\":%s,"
            "\"mtu\":%u,\"ble_pkts\":%lu,\"ble_waits\":%lu,\"ble_err\":%lu,"
            "\"reset_reason\":%lu,\"stack_free\":%lu,\"tick_overflows\":%lu,\"ble_last_err\":%lu,"
-           "\"ble_last_len\":%lu,\"erased_slots\":%d,\"erasing\":%s}",
+           "\"ble_last_len\":%lu,\"erased_slots\":%d,\"erasing\":%s,\"ble_dropped\":%lu,"
+           "\"hall_pins\":%u,\"armed\":%s}",
            logger_state_name(), throttle_neutral_us(), throttle_neutral_learned() ? "true" : "false",
            throttle_signal_ok(now) ? "true" : "false", throttle_tick_width(now),
            flash_count_runs() + (logger_ram_run_available() ? 1 : 0), flash_count_free(),
@@ -227,7 +242,8 @@ static void cmd_status(Link& l) {
            (unsigned long)s_tx_busy_waits, (unsigned long)s_tx_errors,
            (unsigned long)readResetReason(), (unsigned long)g_stack_free_min,
            (unsigned long)g_tick_overflows, (unsigned long)s_tx_last_err,
-           (unsigned long)s_tx_last_len, flash_count_erased(), flash_busy() ? "true" : "false");
+           (unsigned long)s_tx_last_len, flash_count_erased(), flash_busy() ? "true" : "false",
+           (unsigned long)s_tx_dropped, hall_pin_levels(), logger_armed() ? "true" : "false");
   send_text(l, s_out);
 }
 
@@ -309,7 +325,11 @@ static void send_live(Link& l) {
            g_live.v, g_live.v_max, g_live.v_front, g_live.spinning ? 1 : 0, g_live.rpm,
            g_live.throttle_us, g_live.throttle_pct, g_live.ax_g, g_live.zupt ? 1 : 0,
            logger_state_name());
-  send_text(l, s_out);
+  if (!l.is_ble) return send_text(l, s_out);
+  size_t n = strlen(s_out);
+  if (n + 1 >= sizeof(s_out)) return;
+  s_out[n] = '\n';
+  ble_send_typed(FRAME_TEXT, (const uint8_t*)s_out, n + 1, true);
 }
 
 static void handle_line(Link& l, char* line) {

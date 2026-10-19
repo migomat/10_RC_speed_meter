@@ -18,6 +18,8 @@ void hall_tick_snapshot(uint32_t t_tick, HallSnapshot* out);
 void hall_inject_edge(uint32_t t_us, uint8_t line, uint8_t level);
 
 uint8_t  hall_line_level(uint8_t line);
+// Bieżący stan pinów (bity A|B<<1|C<<2) – diagnostyka okablowania (STATUS)
+uint8_t  hall_pin_levels(void);
 // SIM: ustawienie stanu linii (bity A|B<<1|C<<2) bez generowania zboczy
 void     hall_force_levels(uint8_t mask);
 uint32_t hall_edge_count(void);

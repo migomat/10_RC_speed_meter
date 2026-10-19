@@ -36,7 +36,7 @@ DEFAULT_CONFIG = dict(
     lowpass_hz=25.0,
     v_min_mps=0.3,
     rest_gyro_std_dps=1.5,
-    rest_acc_std_g=0.02,
+    rest_acc_std_g=0.06,
     estimator=dict(DEFAULT_PARAMS),
 )
 
@@ -250,8 +250,12 @@ def analyze(run: Run, cfg: dict | None = None) -> dict:
         m = mean(x)
         return math.sqrt(sum((float(v) - m) ** 2 for v in x[:rest_end]) / rest_end)
     amag = np.sqrt(a_fwd ** 2 + a_left ** 2 + a_up ** 2)
-    at_rest = (max(std(g_fwd), std(g_left), std(g_up)) < cfg["rest_gyro_std_dps"]
-               and std(amag) < cfg["rest_acc_std_g"]
+    # rozrzut po filtrze lowpass_hz (tylko okno spoczynku) – drgania wentylatora
+    # ESC (~180 Hz) nie mogą udawać ruchu auta
+    def lp(x):
+        return filtfilt_butter2(x[:rest_end], float(cfg["lowpass_hz"]), fs)
+    at_rest = (max(std(lp(g_fwd)), std(lp(g_left)), std(lp(g_up))) < cfg["rest_gyro_std_dps"]
+               and std(lp(amag)) < cfg["rest_acc_std_g"]
                and int(edges[rest_end - 1]) == int(edges[0]))
     if not at_rest:
         warnings.append("auto nie stało przed startem – bias niepewny")

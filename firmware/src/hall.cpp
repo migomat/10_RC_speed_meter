@@ -156,6 +156,15 @@ void hall_inject_edge(uint32_t t_us, uint8_t line, uint8_t level) {
 
 uint8_t hall_line_level(uint8_t line) { return line < 3 ? s_line_level[line] : 0; }
 
+uint8_t hall_pin_levels(void) {
+  uint8_t m = digitalRead(PIN_HALL_A) ? 1 : 0;
+#if HALL_LINES == 3
+  if (digitalRead(PIN_HALL_B)) m |= 2;
+  if (digitalRead(PIN_HALL_C)) m |= 4;
+#endif
+  return m;
+}
+
 void hall_force_levels(uint8_t mask) {
   noInterrupts();
   for (int i = 0; i < 3; i++) s_line_level[i] = (mask >> i) & 1;

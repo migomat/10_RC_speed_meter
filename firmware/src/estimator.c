@@ -22,17 +22,19 @@ void est_default_params(EstParams* p) {
   p->wheel_corr_tau_s = WHEEL_CORR_TAU_S;
   p->brake_pct = BRAKE_THROTTLE_PCT;
   p->afront_tau_s = EST_AFRONT_TAU_S;
+  p->zupt_lpf_tau_s = ZUPT_LPF_TAU_S;
 #else
   p->yaw_offset_deg = 0.0f;
   p->zupt_ms = 200.0f;
   p->zupt_gyro_dps = 4.0f;
-  p->zupt_acc_g = 0.04f;
+  p->zupt_acc_g = 0.06f;
   p->slip_acc_thr = 3.0f;
   p->slip_v_thr = 0.5f;
   p->grip_hold_ms = 100.0f;
   p->wheel_corr_tau_s = 0.5f;
   p->brake_pct = -10.0f;
   p->afront_tau_s = 0.03f;
+  p->zupt_lpf_tau_s = 0.1f;
 #endif
 }
 
@@ -56,8 +58,16 @@ void est_step(EstState* s, const EstParams* p, const EstInput* in) {
   const float gz = in->g_up_dps - s->gbias_dps[2];
   const float gmag = sqrtf(gx * gx + gy * gy + gz * gz);
   const float amag = sqrtf(af * af + al * al + au * au);
-  const int still = in->hall_stopped && gmag < p->zupt_gyro_dps &&
-                    fabsf(amag - 1.0f) < p->zupt_acc_g;
+  if (s->first) {
+    s->amag_f = amag;
+    s->gmag_f = gmag;
+  } else {
+    const float k = dt / (p->zupt_lpf_tau_s + dt);
+    s->amag_f += k * (amag - s->amag_f);
+    s->gmag_f += k * (gmag - s->gmag_f);
+  }
+  const int still = in->hall_stopped && s->gmag_f < p->zupt_gyro_dps &&
+                    fabsf(s->amag_f - 1.0f) < p->zupt_acc_g;
   if (still) {
     s->still_t += dt;
     s->still_n++;

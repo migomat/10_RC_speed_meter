@@ -67,7 +67,7 @@ def learn_neutral(dev):
 def do_launch(dev, rpm=20000, ramp_ms=1500):
     """Gaz 2000 us + rampa obrotów; czeka na koniec zapisu."""
     dev.command("SIM THR 1500")
-    time.sleep(0.7)            # pre-trigger + uzbrojenie (gaz poniżej progu)
+    time.sleep(1.4)            # pre-trigger 1 s + uzbrojenie (postój ARM_REST_MS)
     dev.command(f"SIM RAMP {rpm} {ramp_ms}")
     dev.command("SIM THR 2000")
     st = wait_state(dev, "RECORDING", 2)
@@ -158,9 +158,11 @@ def t_logger(dev, a):
     dt = time.time() - t0
     r = parse_run(data)
     h = r.header
-    check("liczba próbek", h["n_samples"] == 1750 and h["trigger_index"] == 250,
+    pre = h["pretrigger_ms"] * h["sample_rate_hz"] // 1000
+    tot = pre + h["posttrigger_ms"] * h["sample_rate_hz"] // 1000
+    check("liczba próbek", h["n_samples"] == tot and h["trigger_index"] == pre,
           f"n={h['n_samples']} trig={h['trigger_index']}")
-    check("flaga wyzwolenia", r.samples["flags"][250] & SF_TRIGGER != 0)
+    check("flaga wyzwolenia", r.samples["flags"][pre] & SF_TRIGGER != 0)
     dt_us = (r.samples["t_us"][1:] - r.samples["t_us"][:-1]).astype("int64")
     check("odstęp próbek 2000 us", (dt_us == 2000).all(), f"min {dt_us.min()} max {dt_us.max()}")
     check("zbocza zapisane", h["n_edges"] > 100, f"{h['n_edges']} zboczy")

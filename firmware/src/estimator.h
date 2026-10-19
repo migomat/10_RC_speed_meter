@@ -6,7 +6,9 @@
  *
  * Specyfikacja kroku (wejście = jedna próbka 500 Hz w osiach auta):
  *   1. obrót poziomy o yaw_offset: af = a_fwd·cosψ + a_left·sinψ
- *   2. bezruch: hall_stopped ∧ |ω − bias| < zupt_gyro_dps ∧ ||a| − 1| < zupt_acc_g
+ *   2. bezruch: |ω − bias| i |a| przez filtr IIR 1. rzędu (α = dt/(zupt_lpf_tau + dt),
+ *      w pierwszym kroku = wartość bieżąca) – drgania (wentylator ESC) się uśredniają;
+ *      hall_stopped ∧ |ω|_f < zupt_gyro_dps ∧ ||a|_f − 1| < zupt_acc_g
  *      still_t += dt (inaczej still_t = 0 i zerowanie sum)
  *   3. ZUPT (still_t ≥ zupt_ms): a_ref = średnia af, bias ω = średnia ω
  *      z okresu bezruchu, pitch = 0, v = 0
@@ -44,6 +46,7 @@ typedef struct {
   float wheel_corr_tau_s;
   float brake_pct;
   float afront_tau_s;
+  float zupt_lpf_tau_s;   /* s */
 } EstParams;
 
 typedef struct {
@@ -66,6 +69,7 @@ typedef struct {
   float vf_prev;
   float a_front_f, a_long_f;
   float a_long;
+  float amag_f, gmag_f;
   float grip_t;
   int   spinning;
   int   zupt;

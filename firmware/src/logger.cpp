@@ -1,4 +1,5 @@
 #include "logger.h"
+#include <math.h>
 
 #include <Arduino.h>
 #include "config.h"
@@ -13,7 +14,10 @@ static Sample   s_buf[MAX_SAMPLES];
 static uint32_t s_w;            // następna pozycja zapisu
 static uint32_t s_filled;       // ile próbek w buforze (≤ MAX_SAMPLES)
 static LogState s_state = LS_IDLE;
-static bool     s_armed;        // gaz musi zejść poniżej progu przed kolejnym startem
+static bool     s_armed;        // był postój (ARM_REST_MS) – wyzwolenie dozwolone
+static uint32_t s_rest_n;       // próbek z rzędu: gaz w neutrum i brak zboczy
+static uint32_t s_since_rest_n; // próbek od zejścia z postoju (uzbrojony)
+static uint32_t s_prev_edges;
 static bool     s_force;
 static bool     s_sim;
 
@@ -55,6 +59,7 @@ const char* logger_state_name(void) {
   }
 }
 
+bool logger_armed(void) { return s_armed; }
 bool logger_busy(void) { return s_state == LS_RECORDING || s_state == LS_SAVING; }
 void logger_force_trigger(void) { s_force = true; }
 void logger_set_sim_flag(bool on) { s_sim = on; }
@@ -173,7 +178,22 @@ void logger_push(const Sample& smp, float pct, bool throttle_valid) {
   if (s_state != LS_IDLE) return;
 
   bool learned = throttle_neutral_learned();
-  if (throttle_valid && learned && pct < TRIGGER_THROTTLE_PCT / 2.0f) s_armed = true;
+  // Uzbrojenie po postoju; okno na przekroczenie progu liczone od zejścia z postoju.
+  const uint32_t rest_need = ARM_REST_MS * SAMPLE_RATE_HZ / 1000;
+  const uint32_t window = LAUNCH_WINDOW_MS * SAMPLE_RATE_HZ / 1000;
+  bool rest = throttle_valid && learned && fabsf(pct) < ARM_NEUTRAL_PCT &&
+              smp.hall_edges == s_prev_edges;
+  s_prev_edges = smp.hall_edges;
+  if (rest) {
+    if (s_rest_n < rest_need) s_rest_n++;
+    if (s_rest_n >= rest_need) {
+      s_armed = true;
+      s_since_rest_n = 0;
+    }
+  } else {
+    s_rest_n = 0;
+    if (s_armed && ++s_since_rest_n > window) s_armed = false;
+  }
   bool trig = s_force || (s_armed && throttle_valid && learned && pct > TRIGGER_THROTTLE_PCT);
   if (trig) {
     s_force = false;

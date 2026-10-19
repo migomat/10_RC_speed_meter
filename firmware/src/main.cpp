@@ -126,6 +126,14 @@ static void drain_ticks(uint32_t now) {
   }
 }
 
+// Obsługa pomiaru w trakcie czekania na bufor BLE (ble_send_typed): IMU FIFO
+// i kolejka taktów nie mogą się przepełnić przy słabym zasięgu.
+static void measure_service(void) {
+  uint32_t now = timebase_now();
+  imu_poll(now);
+  drain_ticks(timebase_now());
+}
+
 // Błąd krytyczny (np. przepełnienie stosu) → reset zamiast zawieszenia.
 // Przyczynę widać po restarcie w STATUS.reset_reason (RESETREAS).
 extern "C" void HardFault_Handler(void) { NVIC_SystemReset(); }
@@ -133,7 +141,8 @@ extern "C" void HardFault_Handler(void) { NVIC_SystemReset(); }
 void setup() {
   Serial.begin(115200);
   led_begin();
-  s_ble_ok = ble_begin();          // SoftDevice musi działać przed sd_ppi_*
+  s_ble_ok = ble_begin();
+  ble_set_wait_hook(measure_service);          // SoftDevice musi działać przed sd_ppi_*
   timebase_begin(on_tick);
   timebase_request_hfxo();
   s_hall_ok = hall_begin();
