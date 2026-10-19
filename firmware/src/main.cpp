@@ -138,19 +138,37 @@ static void measure_service(void) {
 // Błąd krytyczny (np. przepełnienie stosu) → reset zamiast zawieszenia.
 // Przyczynę widać po restarcie w STATUS: reset_reason (RESETREAS), boot_hf = 1,
 // gdy poprzedni reset był z HardFault (znacznik w GPREGRET2 – przeżywa reset
-// programowy, bootloader go nie używa). Jeśli HardFault wypadł w trakcie
-// „touch 1200” (wejście do bootloadera z USB), magia DFU jest ustawiana tutaj,
-// żeby wgrywanie nie wymagało przycisku RESET.
+// programowy, bootloader go nie używa).
 #define DIAG_HARDFAULT_MARK   0xA5
 #define DFU_MAGIC_SERIAL_ONLY 0x4E
+#define DFU_MAGIC_UF2         0x57
 uint32_t g_boot_gpregret, g_boot_hf;
 
 extern "C" void HardFault_Handler(void) {
   NRF_POWER->GPREGRET2 = DIAG_HARDFAULT_MARK;
-  cdc_line_coding_t c;
-  tud_cdc_n_get_line_coding(0, &c);
-  if (c.bit_rate == 1200) NRF_POWER->GPREGRET = DFU_MAGIC_SERIAL_ONLY;
   NVIC_SystemReset();
+}
+
+// Wejście do bootloadera. Przy włączonym SoftDevice rejestr GPREGRET trzeba
+// ustawić przez sd_power_gpregret_set – bezpośredni zapis (enterSerialDfu()
+// w rdzeniu, używany przez „touch 1200”) nie dociera do bootloadera i płytka
+// startowała z powrotem w aplikacji (wgrywanie wymagało podwójnego RESET).
+void enter_bootloader(uint8_t magic) {
+  uint8_t sd_en = 0;
+  sd_softdevice_is_enabled(&sd_en);
+  if (sd_en) {
+    sd_power_gpregret_clr(0, 0xFF);
+    sd_power_gpregret_set(0, magic);
+  } else {
+    NRF_POWER->GPREGRET = magic;
+  }
+  NVIC_SystemReset();
+}
+
+// „Touch 1200” (arduino-cli upload): reagujemy już na zmianę prędkości portu,
+// zanim biblioteka TinyUSB przy zrzuceniu DTR wywoła enterSerialDfu().
+extern "C" void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const* coding) {
+  if (itf == 0 && coding->bit_rate == 1200) enter_bootloader(DFU_MAGIC_SERIAL_ONLY);
 }
 
 void setup() {

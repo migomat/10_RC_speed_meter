@@ -376,6 +376,12 @@ static void handle_line(Link& l, char* line) {
     logger_set_sim_flag(true);
     return send_text(l, "OK");
   }
+  if (!strcmp(c, "BOOT") && !l.is_ble) {   // BOOT [UF2] – bootloader (wgrywanie bez RESET)
+    send_text(l, "OK");
+    Serial.flush();
+    delay(50);
+    enter_bootloader(argc > 1 && !strcmp(argv[1], "UF2") ? 0x57 : 0x4E);
+  }
   if (!strcmp(c, "REBOOT") && !l.is_ble) {
     send_text(l, "OK");
     Serial.flush();

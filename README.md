@@ -133,7 +133,13 @@ Budżet RAM: próbki 1750 × 28 B = 49 kB; log zboczy wymiarowany z `MAX_MOTOR_R
   (zgubione próbki IMU, luki w nagraniu – widoczne w startach z salonu). `LIVE` jest porzucany przy
   pełnej kolejce (`ble_dropped` w STATUS), a w czasie czekania na bufor (GET) pętla dalej czyta IMU
   i takty. Moc nadawania +8 dBm (`BLE_TX_POWER_DBM`), PHY w `BLE_PHY_2M`.
-* Komendy `SIM …`, `REBOOT`, `DBG` – tylko USB, do testów na biurku.
+* **Wgrywanie bez przycisku RESET**: „touch 1200” w rdzeniu (`enterSerialDfu()`) zapisuje
+  `NRF_POWER->GPREGRET` bezpośrednio – przy włączonym SoftDevice zapis nie dociera do bootloadera
+  i płytka wracała do aplikacji (wgrywanie wymagało podwójnego RESET). Firmware nadpisuje słabe
+  `tud_cdc_line_coding_cb` i przy 1200 bd ustawia magię DFU przez `sd_power_gpregret_set`
+  (tak jak `BLEDfu`) – `arduino-cli upload` działa bez przycisku. Zapasowo komenda USB `BOOT [UF2]`.
+  STATUS: `boot_hf` = 1, gdy poprzedni reset był z HardFault.
+* Komendy `SIM …`, `REBOOT`, `BOOT`, `DBG` – tylko USB, do testów na biurku.
 
 ## Do zrobienia przy aucie
 
