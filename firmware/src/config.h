@@ -22,7 +22,10 @@
 
 #define MOTOR_POLE_PAIRS    1       // DO ZMIERZENIA / potwierdzenia
 #define EDGES_PER_REV       (2 * HALL_LINES * MOTOR_POLE_PAIRS)
-#define HALL_MIN_EDGE_US    50      // [us] krótsze impulsy = zakłócenie
+// [us] krótsze impulsy na linii = zakłócenie albo drgnięcie wirnika przy ruszaniu
+// (zmierzone: pary zboczy co 130–270 µs). 40 % połówki okresu linii przy MAX_MOTOR_RPM
+// (40 000 rpm → 750 µs) = 300 µs – szybsze zbocza fizycznie niemożliwe.
+#define HALL_MIN_EDGE_US    (60000000UL / (MAX_MOTOR_RPM * 2UL * MOTOR_POLE_PAIRS) * 2 / 5)
 // [us] brak zbocza → prędkość 0. Najniższe mierzalne obroty:
 // 60e6 / (EDGES_PER_REV · timeout). Tryb 1 przy 50 ms nie zmierzyłby 500 rpm
 // (zbocze co 60 ms), dlatego 80 ms (min. 375 rpm); tryb 3: 50 ms (200 rpm).

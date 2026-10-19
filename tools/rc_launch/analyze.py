@@ -230,33 +230,62 @@ def analyze(run: Run, cfg: dict | None = None) -> dict:
     a_fwd, a_left, a_up = (np.asarray(x, dtype=np.float64) for x in (a_fwd, a_left, a_up))
     g_fwd, g_left, g_up = (np.asarray(x, dtype=np.float64) for x in (g_fwd, g_left, g_up))
 
-    # Start: wcześniejsze z (wyzwolenie gazem, pierwsze zbocze halla w nagraniu).
-    # ESC zwykle rusza silnik poniżej progu wyzwolenia, więc zbocze bywa pierwsze.
+    # Start: wcześniejsze z (wyzwolenie gazem, pierwsze zbocze halla po ostatnim
+    # postoju przed wyzwoleniem). ESC zwykle rusza silnik poniżej progu wyzwolenia,
+    # więc zbocze bywa pierwsze. Postój w próbce: period_rev_us = 0 i brak zbocza
+    # dłużej niż hall_timeout (period = 0 bywa też tuż po ruszeniu – okres nieznany).
+    # Koła kręcące się jeszcze z poprzedniego przejazdu nie są startem.
     edges = s["hall_edges"]
-    i_edge0 = n
+    period = s["period_rev_us"]
+    timeout_s = h["hall_timeout_us"] * 1e-6
+    last_chg = [-1] * n
     for i in range(1, n):
-        if edges[i] != edges[0]:
-            i_edge0 = i
+        last_chg[i] = i if int(edges[i]) != int(edges[i - 1]) else last_chg[i - 1]
+    def stopped(i):
+        return int(period[i]) == 0 and (last_chg[i] < 0 or t[i] - t[last_chg[i]] > timeout_s)
+    i_stop = -1
+    for i in range(min(ti, n - 1), -1, -1):
+        if stopped(i):
+            i_stop = i
             break
+    i_edge0 = n
+    if i_stop >= 0:
+        for i in range(i_stop + 1, n):
+            if int(edges[i]) != int(edges[i - 1]):
+                i_edge0 = i
+                break
+    else:
+        warnings.append("brak postoju przed wyzwoleniem")
     i0 = min(ti, i_edge0)
+    # okno spoczynku: ciągły postój kończący się w i_stop (najwyżej do i0)
+    rest_start = 0
+    if i_stop >= 0:
+        rest_start = i_stop
+        while rest_start > 0 and stopped(rest_start - 1):
+            rest_start -= 1
 
     # 3. bias z okna spoczynku przed startem (min. 50 próbek)
-    rest_end = i0 if i0 >= 50 else min(50, n)
-    if i0 < 50:
+    rest_end = i0
+    if rest_end - rest_start < 50:
         warnings.append("krótkie okno spoczynku przed startem")
+        rest_start = max(0, rest_end - 50)
+        rest_end = rest_start + min(50, n)
+    rn = rest_end - rest_start
     def mean(x):
-        return float(sum(float(v) for v in x[:rest_end]) / rest_end)
+        return float(sum(float(v) for v in x[rest_start:rest_end]) / rn)
     def std(x):
         m = mean(x)
-        return math.sqrt(sum((float(v) - m) ** 2 for v in x[:rest_end]) / rest_end)
+        return math.sqrt(sum((float(v) - m) ** 2 for v in x[rest_start:rest_end]) / rn)
     amag = np.sqrt(a_fwd ** 2 + a_left ** 2 + a_up ** 2)
     # rozrzut po filtrze lowpass_hz (tylko okno spoczynku) – drgania wentylatora
     # ESC (~180 Hz) nie mogą udawać ruchu auta
     def lp(x):
-        return filtfilt_butter2(x[:rest_end], float(cfg["lowpass_hz"]), fs)
+        y = np.zeros(n)
+        y[rest_start:rest_end] = filtfilt_butter2(x[rest_start:rest_end], float(cfg["lowpass_hz"]), fs)
+        return y
     at_rest = (max(std(lp(g_fwd)), std(lp(g_left)), std(lp(g_up))) < cfg["rest_gyro_std_dps"]
                and std(lp(amag)) < cfg["rest_acc_std_g"]
-               and int(edges[rest_end - 1]) == int(edges[0]))
+               and int(edges[rest_end - 1]) == int(edges[rest_start]))
     if not at_rest:
         warnings.append("auto nie stało przed startem – bias niepewny")
     a_ref = mean(a_fwd)
@@ -285,7 +314,6 @@ def analyze(run: Run, cfg: dict | None = None) -> dict:
     # 7. v_front
     epr = int(h["edges_per_rev"])
     m_per_rev = math.pi * cfg["front_tire_diameter_mm"] * 1e-3 / cfg["final_drive_ratio"]
-    timeout_s = h["hall_timeout_us"] * 1e-6
     use_edges = h["n_edges"] > 0 and not (h["flags"] & 0x0001)
     if use_edges:
         v_front = v_front_from_edges(t, run.edges_t_s, epr, timeout_s, m_per_rev)
@@ -329,8 +357,13 @@ def analyze(run: Run, cfg: dict | None = None) -> dict:
 
     # czas pierwszego zbocza (względem wyzwolenia; ujemny = silnik ruszył przed progiem)
     t_first_edge = float("nan")
-    if h["n_edges"] > 0:
-        t_first_edge = float(run.edges_t_s[0])
+    # (pierwsze zbocze po próbce postoju i_stop)
+    if h["n_edges"] > 0 and i_stop >= 0:
+        t_stop = float(t[i_stop])
+        for te in run.edges_t_s:
+            if te > t_stop:
+                t_first_edge = float(te)
+                break
     elif i_edge0 < n:
         t_first_edge = float(t[i_edge0])
 

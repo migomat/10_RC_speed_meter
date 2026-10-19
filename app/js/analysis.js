@@ -187,24 +187,52 @@ export function analyze(run, settings) {
   const [aFwd, aLeft, aUp] = mapAxes(sc(run.ax, ka), sc(run.ay, ka), sc(run.az, ka), cfg.imu_axes);
   const [gFwd, gLeft, gUp] = mapAxes(sc(run.gx, kg), sc(run.gy, kg), sc(run.gz, kg), cfg.imu_axes);
 
-  // start: wcześniejsze z (wyzwolenie gazem, pierwsze zbocze halla)
+  // start: wcześniejsze z (wyzwolenie gazem, pierwsze zbocze halla po ostatnim
+  // postoju przed wyzwoleniem); postój w próbce: period_rev_us = 0 i brak zbocza
+  // dłużej niż hall_timeout (period = 0 bywa też tuż po ruszeniu – okres nieznany)
   const edges = run.hall_edges;
+  const period = run.period_rev_us;
+  const timeoutS = h.hall_timeout_us * 1e-6;
+  const lastChg = new Int32Array(n).fill(-1);
+  for (let i = 1; i < n; i++) lastChg[i] = edges[i] !== edges[i - 1] ? i : lastChg[i - 1];
+  const stopped = (i) => period[i] === 0 && (lastChg[i] < 0 || t[i] - t[lastChg[i]] > timeoutS);
+  let iStop = -1;
+  for (let i = Math.min(ti, n - 1); i >= 0; i--) if (stopped(i)) { iStop = i; break; }
   let iEdge0 = n;
-  for (let i = 1; i < n; i++) if (edges[i] !== edges[0]) { iEdge0 = i; break; }
+  if (iStop >= 0) {
+    for (let i = iStop + 1; i < n; i++) if (edges[i] !== edges[i - 1]) { iEdge0 = i; break; }
+  } else {
+    warnings.push('brak postoju przed wyzwoleniem');
+  }
   const i0 = Math.min(ti, iEdge0);
+  // okno spoczynku: ciągły postój kończący się w iStop (najwyżej do i0)
+  let restStart = 0;
+  if (iStop >= 0) {
+    restStart = iStop;
+    while (restStart > 0 && stopped(restStart - 1)) restStart--;
+  }
 
   // 3. bias
-  const restEnd = i0 >= 50 ? i0 : Math.min(50, n);
-  if (i0 < 50) warnings.push('krótkie okno spoczynku przed startem');
-  const mean = (x) => { let s = 0; for (let i = 0; i < restEnd; i++) s += x[i]; return s / restEnd; };
-  const std = (x) => { const m = mean(x); let s = 0; for (let i = 0; i < restEnd; i++) s += (x[i] - m) ** 2; return Math.sqrt(s / restEnd); };
+  let restEnd = i0;
+  if (restEnd - restStart < 50) {
+    warnings.push('krótkie okno spoczynku przed startem');
+    restStart = Math.max(0, restEnd - 50);
+    restEnd = restStart + Math.min(50, n);
+  }
+  const rn = restEnd - restStart;
+  const mean = (x) => { let s = 0; for (let i = restStart; i < restEnd; i++) s += x[i]; return s / rn; };
+  const std = (x) => { const m = mean(x); let s = 0; for (let i = restStart; i < restEnd; i++) s += (x[i] - m) ** 2; return Math.sqrt(s / rn); };
   const amag = new Float64Array(n);
   for (let i = 0; i < n; i++) amag[i] = Math.sqrt(aFwd[i] ** 2 + aLeft[i] ** 2 + aUp[i] ** 2);
   // rozrzut po filtrze lowpass_hz (tylko okno spoczynku) – drgania wentylatora
   // ESC (~180 Hz) nie mogą udawać ruchu auta
-  const lp = (x) => filtfiltButter2(x.subarray(0, restEnd), cfg.lowpass_hz, fs);
+  const lp = (x) => {
+    const y = new Float64Array(n);
+    y.set(filtfiltButter2(x.subarray(restStart, restEnd), cfg.lowpass_hz, fs), restStart);
+    return y;
+  };
   const atRest = Math.max(std(lp(gFwd)), std(lp(gLeft)), std(lp(gUp))) < cfg.rest_gyro_std_dps &&
-    std(lp(amag)) < cfg.rest_acc_std_g && edges[restEnd - 1] === edges[0];
+    std(lp(amag)) < cfg.rest_acc_std_g && edges[restEnd - 1] === edges[restStart];
   if (!atRest) warnings.push('auto nie stało przed startem – bias niepewny');
   const aRef = mean(aFwd);
   const gbLeft = mean(gLeft);
@@ -232,7 +260,6 @@ export function analyze(run, settings) {
   // 7.
   const epr = h.edges_per_rev;
   const mPerRev = Math.PI * cfg.front_tire_diameter_mm * 1e-3 / cfg.final_drive_ratio;
-  const timeoutS = h.hall_timeout_us * 1e-6;
   const useEdges = h.n_edges > 0 && !(h.flags & 0x0001);
   const vFront = useEdges ? vFrontFromEdges(t, run.edges_t_s, epr, timeoutS, mPerRev)
     : vFrontFromPeriods(run.period_rev_us, mPerRev);
@@ -275,8 +302,11 @@ export function analyze(run, settings) {
   }
 
   let tFirstEdge = NaN;
-  if (h.n_edges > 0) tFirstEdge = run.edges_t_s[0];
-  else if (iEdge0 < n) tFirstEdge = t[iEdge0];
+  // (pierwsze zbocze po próbce postoju iStop)
+  if (h.n_edges > 0 && iStop >= 0) {
+    const tStop = t[iStop];
+    for (const te of run.edges_t_s) if (te > tStop) { tFirstEdge = te; break; }
+  } else if (iEdge0 < n) tFirstEdge = t[iEdge0];
 
   const pitchDeg = new Float64Array(n);
   for (let i = 0; i < n; i++) pitchDeg[i] = pitch[i] * 180 / Math.PI;
