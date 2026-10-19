@@ -37,6 +37,7 @@ DEFAULT_CONFIG = dict(
     v_min_mps=0.3,
     rest_gyro_std_dps=1.5,
     rest_acc_std_g=0.06,
+    edge_min_us=300,
     estimator=dict(DEFAULT_PARAMS),
 )
 
@@ -163,6 +164,30 @@ def map_axes(vx, vy, vz, axes: dict):
 # ------------------------------------------------------------------ v_front
 def v_front_from_periods(period_us, m_per_rev):
     return np.array([m_per_rev * 1e6 / p if p > 0 else 0.0 for p in period_us], dtype=np.float64)
+
+
+def filter_edges(e_t, e_line, min_s: float) -> list:
+    """Filtr drgnięć jak w firmware (hall.cpp): zbocze bliżej niż min_s od poprzedniego
+    zbocza tej samej linii jest odrzucane razem z tamtym (o ile to ono było ostatnim
+    przyjętym zboczem). Zwraca czasy przyjętych zboczy."""
+    kept = []
+    last = {}
+    undo = None          # (linia, poprzedni czas tej linii)
+    for k in range(len(e_t)):
+        ln, tk = int(e_line[k]), float(e_t[k])
+        if ln in last and tk - last[ln] < min_s:
+            if undo is not None and undo[0] == ln:
+                kept.pop()
+                if undo[1] is None:
+                    del last[ln]
+                else:
+                    last[ln] = undo[1]
+                undo = None
+            continue
+        undo = (ln, last.get(ln))
+        kept.append(tk)
+        last[ln] = tk
+    return kept
 
 
 def v_front_from_edges(t_s, e_t, epr: int, timeout_s: float, m_per_rev: float) -> np.ndarray:
@@ -315,8 +340,11 @@ def analyze(run: Run, cfg: dict | None = None) -> dict:
     epr = int(h["edges_per_rev"])
     m_per_rev = math.pi * cfg["front_tire_diameter_mm"] * 1e-3 / cfg["final_drive_ratio"]
     use_edges = h["n_edges"] > 0 and not (h["flags"] & 0x0001)
+    # zbocza po filtrze drgnięć (starsze nagrania miały filtr 50 µs)
+    edge_min_s = max(float(h["hall_min_edge_us"]), float(cfg["edge_min_us"])) * 1e-6
+    edges_t = filter_edges(run.edges_t_s, run.edges_line, edge_min_s) if h["n_edges"] > 0 else []
     if use_edges:
-        v_front = v_front_from_edges(t, run.edges_t_s, epr, timeout_s, m_per_rev)
+        v_front = v_front_from_edges(t, edges_t, epr, timeout_s, m_per_rev)
     else:
         v_front = v_front_from_periods(s["period_rev_us"], m_per_rev)
     v_front_sample = v_front_from_periods(s["period_rev_us"], m_per_rev)
@@ -360,7 +388,7 @@ def analyze(run: Run, cfg: dict | None = None) -> dict:
     # (pierwsze zbocze po próbce postoju i_stop)
     if h["n_edges"] > 0 and i_stop >= 0:
         t_stop = float(t[i_stop])
-        for te in run.edges_t_s:
+        for te in edges_t:
             if te > t_stop:
                 t_first_edge = float(te)
                 break
@@ -369,7 +397,9 @@ def analyze(run: Run, cfg: dict | None = None) -> dict:
 
     series = dict(t=t, throttle_pct=thr_pct, v_front=v_front, v_imu=v_imu, v_disp=v_disp,
                   a_front=a_front, a_long=a_long, slip=slip, spin=spin, pitch_deg=np.degrees(pitch),
-                  d_front=d_front, d_imu=d_imu)
+                  d_front=d_front, d_imu=d_imu,
+                  # obroty silnika z v_front (niezależne od FDR i średnicy opony)
+                  rpm=np.array([float(v) / m_per_rev * 60.0 for v in v_front]))
     metrics = compute_metrics(series, i0, vmin, t_first_edge)
     return dict(series=series, metrics=metrics, warnings=warnings, at_rest=at_rest,
                 header=h, used_raw_edges=use_edges, i0=i0)
@@ -395,6 +425,10 @@ def compute_metrics(sr: dict, i0: int, vmin: float, t_first_edge: float) -> dict
         x = sr["spin"][i]
         if x > 0:
             spin_int += x * (t[i] - t[i - 1])
+    rpm_max, rpm_max_t = 0.0, float("nan")
+    for i in range(ti, n):
+        if sr["rpm"][i] > rpm_max:
+            rpm_max, rpm_max_t = float(sr["rpm"][i]), float(t[i] - t0)
     t1m = first_crossing(t, sr["d_imu"], 1.0, ti)
     t2m = first_crossing(t, sr["d_imu"], 2.0, ti)
     return dict(
@@ -409,6 +443,8 @@ def compute_metrics(sr: dict, i0: int, vmin: float, t_first_edge: float) -> dict
         peak_slip_t=peak_t,
         spin_integral=spin_int,
         esc_delay_s=t_first_edge,
+        rpm_max=rpm_max,
+        rpm_max_t=rpm_max_t,
         t_launch_s=t0,
     )
 

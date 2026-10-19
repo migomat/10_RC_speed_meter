@@ -11,6 +11,7 @@
   "v_min_mps": 0.3,
   "rest_gyro_std_dps": 1.5,
   "rest_acc_std_g": 0.06,
+  "edge_min_us": 300,
   "estimator": {
    "yaw_offset_deg": 0.0,
    "zupt_ms": 200.0,
@@ -37,6 +38,8 @@
   "peak_slip_t": 0.176,
   "spin_integral": 3.6082514834232473,
   "esc_delay_s": 0.10040199999999999,
+  "rpm_max": 20491.803278689786,
+  "rpm_max_t": 2.9979999999999998,
   "t_launch_s": 0.0
  },
  "warnings": [],

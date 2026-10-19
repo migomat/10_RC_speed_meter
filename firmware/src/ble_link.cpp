@@ -226,7 +226,7 @@ static void cmd_status(Link& l) {
            "\"mtu\":%u,\"ble_pkts\":%lu,\"ble_waits\":%lu,\"ble_err\":%lu,"
            "\"reset_reason\":%lu,\"stack_free\":%lu,\"tick_overflows\":%lu,\"ble_last_err\":%lu,"
            "\"ble_last_len\":%lu,\"erased_slots\":%d,\"erasing\":%s,\"ble_dropped\":%lu,"
-           "\"hall_pins\":%u,\"armed\":%s}",
+           "\"hall_pins\":%u,\"armed\":%s,\"boot_gpregret\":%lu,\"boot_hf\":%lu}",
            logger_state_name(), throttle_neutral_us(), throttle_neutral_learned() ? "true" : "false",
            throttle_signal_ok(now) ? "true" : "false", throttle_tick_width(now),
            flash_count_runs() + (logger_ram_run_available() ? 1 : 0), flash_count_free(),
@@ -243,7 +243,8 @@ static void cmd_status(Link& l) {
            (unsigned long)readResetReason(), (unsigned long)g_stack_free_min,
            (unsigned long)g_tick_overflows, (unsigned long)s_tx_last_err,
            (unsigned long)s_tx_last_len, flash_count_erased(), flash_busy() ? "true" : "false",
-           (unsigned long)s_tx_dropped, hall_pin_levels(), logger_armed() ? "true" : "false");
+           (unsigned long)s_tx_dropped, hall_pin_levels(), logger_armed() ? "true" : "false",
+           (unsigned long)g_boot_gpregret, (unsigned long)g_boot_hf);
   send_text(l, s_out);
 }
 

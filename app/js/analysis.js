@@ -13,6 +13,7 @@ export const DEFAULT_SETTINGS = {
   v_min_mps: 0.3,
   rest_gyro_std_dps: 1.5,
   rest_acc_std_g: 0.06,   // po filtrze lowpass_hz (drgania wentylatora ESC ~0,03–0,05 g)
+  edge_min_us: 300,       // [µs] min. odstęp zboczy linii (drgnięcia wirnika przy ruszaniu)
   estimator: { ...DEFAULT_EST_PARAMS },
 };
 
@@ -139,6 +140,30 @@ export function vFrontFromPeriods(period, mPerRev) {
   return out;
 }
 
+// Filtr drgnięć jak w firmware (hall.cpp): zbocze bliżej niż minS od poprzedniego
+// zbocza tej samej linii jest odrzucane razem z tamtym (o ile to ono było ostatnim
+// przyjętym zboczem). Zwraca czasy przyjętych zboczy.
+export function filterEdges(eT, eLine, minS) {
+  const kept = [];
+  const last = new Map();
+  let undo = null;     // [linia, poprzedni czas tej linii]
+  for (let k = 0; k < eT.length; k++) {
+    const ln = eLine[k], tk = eT[k];
+    if (last.has(ln) && tk - last.get(ln) < minS) {
+      if (undo !== null && undo[0] === ln) {
+        kept.pop();
+        if (undo[1] === null) last.delete(ln); else last.set(ln, undo[1]);
+        undo = null;
+      }
+      continue;
+    }
+    undo = [ln, last.has(ln) ? last.get(ln) : null];
+    kept.push(tk);
+    last.set(ln, tk);
+  }
+  return Float64Array.from(kept);
+}
+
 export function vFrontFromEdges(tS, eT, epr, timeoutS, mPerRev) {
   const n = tS.length, ne = eT.length;
   const vk = new Float64Array(ne);
@@ -261,7 +286,10 @@ export function analyze(run, settings) {
   const epr = h.edges_per_rev;
   const mPerRev = Math.PI * cfg.front_tire_diameter_mm * 1e-3 / cfg.final_drive_ratio;
   const useEdges = h.n_edges > 0 && !(h.flags & 0x0001);
-  const vFront = useEdges ? vFrontFromEdges(t, run.edges_t_s, epr, timeoutS, mPerRev)
+  // zbocza po filtrze drgnięć (starsze nagrania miały filtr 50 µs)
+  const edgeMinS = Math.max(h.hall_min_edge_us, cfg.edge_min_us) * 1e-6;
+  const edgesT = h.n_edges > 0 ? filterEdges(run.edges_t_s, run.edges_line, edgeMinS) : new Float64Array(0);
+  const vFront = useEdges ? vFrontFromEdges(t, edgesT, epr, timeoutS, mPerRev)
     : vFrontFromPeriods(run.period_rev_us, mPerRev);
   const vFrontSample = vFrontFromPeriods(run.period_rev_us, mPerRev);
 
@@ -305,7 +333,7 @@ export function analyze(run, settings) {
   // (pierwsze zbocze po próbce postoju iStop)
   if (h.n_edges > 0 && iStop >= 0) {
     const tStop = t[iStop];
-    for (const te of run.edges_t_s) if (te > tStop) { tFirstEdge = te; break; }
+    for (const te of edgesT) if (te > tStop) { tFirstEdge = te; break; }
   } else if (iEdge0 < n) tFirstEdge = t[iEdge0];
 
   const pitchDeg = new Float64Array(n);
@@ -314,6 +342,8 @@ export function analyze(run, settings) {
   const series = {
     t, throttle_pct: thrPct, v_front: vFront, v_imu: vImu, v_disp: vDisp, a_front: aFront,
     a_long: aLong, slip, spin, pitch_deg: pitchDeg, d_front: dFront, d_imu: dImu,
+    // obroty silnika z v_front (niezależne od FDR i średnicy opony)
+    rpm: Float64Array.from(vFront, (v) => v / mPerRev * 60),
   };
   const metrics = computeMetrics(series, i0, vmin, tFirstEdge);
   return { series, metrics, warnings, at_rest: atRest, header: h, used_raw_edges: useEdges, i0 };
@@ -341,6 +371,8 @@ export function computeMetrics(sr, i0, vmin, tFirstEdge) {
     const x = sr.spin[i];
     if (x > 0) spinInt += x * (t[i] - t[i - 1]);
   }
+  let rpmMax = 0, rpmMaxT = NaN;
+  for (let i = i0; i < n; i++) if (sr.rpm[i] > rpmMax) { rpmMax = sr.rpm[i]; rpmMaxT = t[i] - t0; }
   let vmax = -Infinity;
   for (let i = 0; i < n; i++) if (sr.v_disp[i] > vmax) vmax = sr.v_disp[i];
   return {
@@ -355,6 +387,8 @@ export function computeMetrics(sr, i0, vmin, tFirstEdge) {
     peak_slip_t: peakT,
     spin_integral: spinInt,
     esc_delay_s: tFirstEdge,
+    rpm_max: rpmMax,
+    rpm_max_t: rpmMaxT,
     t_launch_s: t0,
   };
 }
@@ -371,4 +405,6 @@ export const METRIC_LABELS = {
   peak_slip_t: ['czas szczytu', 's'],
   spin_integral: ['przebuksowanie', 'm/s'],
   esc_delay_s: ['opóźnienie ESC', 'ms'],
+  rpm_max: ['maks. obroty silnika', 'rpm'],
+  rpm_max_t: ['czas maks. obrotów', 's'],
 };

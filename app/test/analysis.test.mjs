@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { parseRun, runCrc, FormatError } from '../js/format.js';
-import { analyze, filtfiltButter2 } from '../js/analysis.js';
+import { analyze, filtfiltButter2, filterEdges } from '../js/analysis.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const VEC = join(here, '..', '..', 'test_vectors');
@@ -64,4 +64,10 @@ test('przepełnienie licznika czasu (uint32)', () => {
 test('filtr: stała na wejściu → stała na wyjściu', () => {
   const y = filtfiltButter2(new Float64Array(100).fill(3.5), 25, 500);
   for (const v of y) assert.ok(Math.abs(v - 3.5) < 1e-12);
+});
+
+test('filtr zboczy: drgnięcie wirnika odrzucone (jak tests/test_analyze.py)', () => {
+  const kept = filterEdges([0.0, 0.000268, 0.000456, 0.026911, 0.036960, 0.043694], [0, 0, 0, 0, 0, 0], 300e-6);
+  assert.deepEqual(Array.from(kept), [0.000456, 0.026911, 0.036960, 0.043694]);
+  assert.deepEqual(Array.from(filterEdges([0, 0.0001, 0.0002], [0, 1, 2], 300e-6)), [0, 0.0001, 0.0002]);
 });

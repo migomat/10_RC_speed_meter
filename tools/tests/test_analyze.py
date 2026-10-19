@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from rc_launch.analyze import DEFAULT_CONFIG, analyze, butter2_coeffs, filtfilt_butter2
+from rc_launch.analyze import DEFAULT_CONFIG, analyze, butter2_coeffs, filter_edges, filtfilt_butter2
 from rc_launch.parse import FormatError, parse_run
 from rc_launch.protocol import run_crc
 
@@ -120,3 +120,15 @@ def test_build_roundtrip():
     r = parse_run(data)
     again = build_run(r.header, r.samples, r.edges_t_us, r.edges_line, r.edges_level)
     assert again == data
+
+
+# drgnięcie wirnika przy ruszaniu (zmierzone: 268 µs, 188 µs) – para odrzucona, trzecie zbocze zostaje
+EDGE_CASE_T = [0.0, 0.000268, 0.000456, 0.026911, 0.036960, 0.043694]
+EDGE_CASE_L = [0, 0, 0, 0, 0, 0]
+EDGE_CASE_KEPT = [0.000456, 0.026911, 0.036960, 0.043694]
+
+
+def test_filter_edges_bounce():
+    assert filter_edges(EDGE_CASE_T, EDGE_CASE_L, 300e-6) == EDGE_CASE_KEPT
+    # inne linie nie wpływają na siebie (tryb 3)
+    assert filter_edges([0.0, 0.0001, 0.0002], [0, 1, 2], 300e-6) == [0.0, 0.0001, 0.0002]

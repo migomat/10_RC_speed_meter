@@ -299,6 +299,9 @@ function renderSpeed(m) {
   $('spdValue').textContent = fmt(speedConv(m.v), 1);
   $('spdMax').textContent = fmt(speedConv(m.v_max), 1);
   $('spdFront').textContent = fmt(speedConv(m.v_front), 1);
+  state.rpmMax = Math.max(state.rpmMax || 0, m.rpm || 0);
+  $('spdRpm').textContent = Math.round(m.rpm || 0);
+  $('spdRpmMax').textContent = Math.round(state.rpmMax);
   $('spdThr').textContent = `${fmt(m.thr_pct, 0)} %`;
   $('spdState').textContent = m.state === 'RECORDING' ? '● nagrywanie' : '';
   const s = $('spdSlip');
@@ -350,6 +353,8 @@ function metricValue(k, v) {
   if (v == null || Number.isNaN(v)) return '–';
   if (k === 'peak_slip') return fmt(v * 100, 0);
   if (k === 'esc_delay_s') return fmt(v * 1000, 0);
+  if (k === 'rpm_max') return fmt(v, 0);
+  if (k === 'rpm_max_t') return fmt(v, 3);
   if (k.startsWith('t_') || k === 'peak_slip_t') return fmt(v, 3);
   return fmt(v, 2);
 }
@@ -379,6 +384,7 @@ async function renderRunsList() {
       ${rec.note ? `<div class="muted small">${esc(rec.note)}</div>` : ''}
       <div class="m"><span>a 0–0,3 s <b>${metricValue('a', m.a_long_0_300ms)}</b> m/s²</span>
       <span>v 1 s <b>${metricValue('v', m.v_imu_1_0s)}</b> m/s</span>
+      <span>obroty <b>${metricValue('rpm_max', m.rpm_max)}</b> rpm</span>
       <span>poślizg <b>${metricValue('peak_slip', m.peak_slip)}</b> %</span>
       <span class="muted">seq ${rec.seq}</span></div>`;
     b.onclick = () => openRun(rec.id);
@@ -434,6 +440,7 @@ function renderRunCharts(res) {
       { label: 'a_front', values: s.a_front, color: PALETTE[1] },
       { label: 'a_long', values: s.a_long, color: PALETTE[0], width: 2 }] },
     { label: 'poślizg', unit: '%', height: 140, series: [{ label: 'poślizg', values: pct(s.slip), color: PALETTE[6] }] },
+    { label: 'obroty', unit: 'rpm', height: 140, series: [{ label: 'obroty silnika', values: s.rpm, color: PALETTE[5] }] },
     { label: 'pitch', unit: '°', height: 110, series: [{ label: 'pitch', values: s.pitch_deg, color: PALETTE[3] }] },
   ]);
   setRunRange('1');
@@ -462,7 +469,7 @@ async function saveRunTag() {
 function runCsv(rec) {
   const res = getAnalysis(rec);
   const s = res.series;
-  const cols = ['t', 'throttle_pct', 'v_front', 'v_imu', 'v_disp', 'a_front', 'a_long', 'slip', 'spin', 'pitch_deg', 'd_front', 'd_imu'];
+  const cols = ['t', 'throttle_pct', 'v_front', 'v_imu', 'v_disp', 'a_front', 'a_long', 'slip', 'spin', 'pitch_deg', 'd_front', 'd_imu', 'rpm'];
   const lines = [cols.join(';')];
   for (let i = 0; i < s.t.length; i++) lines.push(cols.map((c) => Number(s[c][i]).toFixed(5)).join(';'));
   return lines.join('\n');
@@ -663,7 +670,10 @@ async function init() {
   try {
     if (localStorage.getItem('x4f_unit') === 'ms') $('spdUnit').click();
   } catch (e) { /* */ }
-  $('spdReset').onclick = async () => { if (state.device) { await state.device.vmaxReset(); toast('Wyzerowano prędkość maksymalną'); } };
+  $('spdReset').onclick = async () => {
+    state.rpmMax = 0;
+    if (state.device) { await state.device.vmaxReset(); toast('Wyzerowano prędkość i obroty maksymalne'); }
+  };
 
   $('runsFilter').onchange = () => renderRunsList();
   $('runBack').onclick = () => goto('runs');

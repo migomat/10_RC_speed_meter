@@ -1,6 +1,7 @@
 // X4F Launch Logger – faza 1 (tylko pomiar). Urządzenie wyłącznie
 // podsłuchuje sygnały halla i gazu; nie ma żadnego wyjścia do ESC.
 #include <Arduino.h>
+#include "tusb.h"
 #include <math.h>
 
 #include "ble_link.h"
@@ -135,14 +136,32 @@ static void measure_service(void) {
 }
 
 // Błąd krytyczny (np. przepełnienie stosu) → reset zamiast zawieszenia.
-// Przyczynę widać po restarcie w STATUS.reset_reason (RESETREAS).
-extern "C" void HardFault_Handler(void) { NVIC_SystemReset(); }
+// Przyczynę widać po restarcie w STATUS: reset_reason (RESETREAS), boot_hf = 1,
+// gdy poprzedni reset był z HardFault (znacznik w GPREGRET2 – przeżywa reset
+// programowy, bootloader go nie używa). Jeśli HardFault wypadł w trakcie
+// „touch 1200” (wejście do bootloadera z USB), magia DFU jest ustawiana tutaj,
+// żeby wgrywanie nie wymagało przycisku RESET.
+#define DIAG_HARDFAULT_MARK   0xA5
+#define DFU_MAGIC_SERIAL_ONLY 0x4E
+uint32_t g_boot_gpregret, g_boot_hf;
+
+extern "C" void HardFault_Handler(void) {
+  NRF_POWER->GPREGRET2 = DIAG_HARDFAULT_MARK;
+  cdc_line_coding_t c;
+  tud_cdc_n_get_line_coding(0, &c);
+  if (c.bit_rate == 1200) NRF_POWER->GPREGRET = DFU_MAGIC_SERIAL_ONLY;
+  NVIC_SystemReset();
+}
 
 void setup() {
+  // przed włączeniem SoftDevice – rejestry POWER dostępne bezpośrednio
+  g_boot_gpregret = NRF_POWER->GPREGRET;
+  g_boot_hf = NRF_POWER->GPREGRET2 == DIAG_HARDFAULT_MARK;
+  NRF_POWER->GPREGRET2 = 0;
   Serial.begin(115200);
   led_begin();
-  s_ble_ok = ble_begin();
-  ble_set_wait_hook(measure_service);          // SoftDevice musi działać przed sd_ppi_*
+  s_ble_ok = ble_begin();          // SoftDevice musi działać przed sd_ppi_*
+  ble_set_wait_hook(measure_service);
   timebase_begin(on_tick);
   timebase_request_hfxo();
   s_hall_ok = hall_begin();
