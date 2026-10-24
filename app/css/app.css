@@ -133,3 +133,9 @@ nav.tabs button.active { color: var(--accent); font-weight: 600; }
 @media (min-width: 700px) and (orientation: landscape) {
   .speed-value { font-size: 10rem; }
 }
+
+.trackmap { width: 100%; height: min(90vw, 460px); display: block; }
+#raceLaps table tr.lap { cursor: pointer; }
+#raceLaps table tr.sel td { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+#raceLaps table tr.bad td { color: var(--muted); }
+#raceLaps table td.best { font-weight: 700; }

@@ -81,9 +81,15 @@ Obok startów (500 Hz, 4 s, bufor pierścieniowy) Xiao nagrywa **całe wyścigi*
   wzdłużne i boczne, prędkość skrętu), metryki, CSV, tagi; „Pobierz wszystko” pobiera też wyścigi,
   karta *Pamięć wyścigów* pokazuje zajętość i kasowanie. Analiza: `analyze_race` / `analyzeRace`
   (wspólne wektory `test_vectors/race_*.bin`).
-* **Podział na okrążenia** (tor stały): do zrobienia po pierwszych prawdziwych wyścigach – kurs
-  z całki żyroskopu (N × 360° na okrążenie) i powtarzalny profil prędkości / skrętu, dopasowanie
-  okrążeń do wzorcowego.
+* **Okrążenia i mapa toru** (tor stały, jazda w kółko; `race_laps` / `raceLaps`): pozycja = droga
+  z licznika zboczy × kierunek z całki żyroskopu (bias z postoju przed startem). Granica okrążenia:
+  kurs od startu przekracza kolejne wielokrotności 360°. Okrążenia z drogą ±20 % od mediany
+  (`race_lap_dist_tol` – buksowanie, uderzenie) pomijane. Tor = średnia dobrych okrążeń
+  przepróbkowanych po drodze (200 punktów) i dopasowanych do wzorca obrotem i przesunięciem
+  (3 iteracje). W aplikacji: mapa z kolorem prędkości, tabela okrążeń (czas, strata do najlepszego,
+  droga, v maks.), dotknięcie okrążenia = to okrążenie na mapie i na wykresach.
+  Salon 2026-10-24: 16 okrążeń, tor ok. 11,8 m, najlepsze 6,00 s; Python = JS z dokładnością 1e-14.
+  Ograniczenie: buksowanie zawyża drogę (tor surowy „odpływa”), dlatego dopasowanie okrążeń.
 
 ## Ustalenia sprzętowe (sprawdzone w źródłach i na płytce)
 

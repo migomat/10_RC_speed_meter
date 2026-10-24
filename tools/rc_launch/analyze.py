@@ -39,6 +39,9 @@ DEFAULT_CONFIG = dict(
     rest_acc_std_g=0.06,
     edge_min_us=300,
     race_lowpass_hz=5.0,
+    race_lap_dist_tol=0.2,
+    race_track_points=200,
+    race_track_v_lowpass_hz=2.0,
     estimator=dict(DEFAULT_PARAMS),
 )
 
@@ -559,10 +562,120 @@ def analyze_race(race: Race, cfg: dict | None = None) -> dict:
         heading_total_deg=float(heading[i_last] - heading[ti]),
         gaps=gaps,
     )
+    ds = [int(s["edges"][i]) / epr * m_per_rev for i in range(n)]
+    v_track = filtfilt_butter2([ds[i] / dt[i] for i in range(n)], float(cfg["race_track_v_lowpass_hz"]), fs)
+    laps, track = race_laps(ds, heading, v_track, t, ti, i_last, cfg)
+    good = [lp for lp in laps if lp["good"]]
+    metrics["laps_n"] = len(laps)
+    metrics["best_lap_s"] = min(lp["time_s"] for lp in good) if good else float("nan")
+    metrics["track_length_m"] = track["length_m"] if track else float("nan")
     series = dict(t=t, throttle_pct=thr_pct, rpm=rpm, v_front=v_front, d_front=d_front,
-                  a_long=a_long, a_lat=a_lat, yaw_rate=yaw_rate, heading_deg=heading)
+                  a_long=a_long, a_lat=a_lat, yaw_rate=yaw_rate, heading_deg=heading, v_track=v_track)
     return dict(series=series, metrics=metrics, warnings=warnings, header=h,
-                end_reason=race.end_reason, i_start=ti, i_last=i_last)
+                end_reason=race.end_reason, i_start=ti, i_last=i_last, laps=laps, track=track)
+
+
+def interp_lin(xq, xp, fp) -> list:
+    """Interpolacja liniowa dla rosnących xq (xp niemalejące); poza zakresem – wartości brzegowe.
+    Przy równych xp bierze pierwszy punkt z xp ≥ x."""
+    out = []
+    k = 0
+    m = len(xp)
+    for x in xq:
+        while k < m - 1 and xp[k] < x:
+            k += 1
+        if k == 0 or xp[k] < x:
+            out.append(float(fp[k]))
+        elif xp[k] == xp[k - 1]:
+            out.append(float(fp[k]))
+        else:
+            f = (x - xp[k - 1]) / (xp[k] - xp[k - 1])
+            out.append(float(fp[k - 1] + f * (fp[k] - fp[k - 1])))
+    return out
+
+
+def align_2d(px, py, rx, ry):
+    """Obrót + przesunięcie punktów P na wzorzec R (najmniejsze kwadraty, postać zamknięta)."""
+    n = len(px)
+    pcx, pcy = sum(px) / n, sum(py) / n
+    rcx, rcy = sum(rx) / n, sum(ry) / n
+    sc = ss = 0.0
+    for i in range(n):
+        ax, ay = px[i] - pcx, py[i] - pcy
+        bx, by = rx[i] - rcx, ry[i] - rcy
+        sc += ax * bx + ay * by
+        ss += ax * by - ay * bx
+    th = math.atan2(ss, sc)
+    c, s_ = math.cos(th), math.sin(th)
+    ox = [c * (px[i] - pcx) - s_ * (py[i] - pcy) + rcx for i in range(n)]
+    oy = [s_ * (px[i] - pcx) + c * (py[i] - pcy) + rcy for i in range(n)]
+    return ox, oy
+
+
+def race_laps(ds, heading, v_track, t, i0, i1, cfg):
+    """Okrążenia i tor (tor stały, jazda w kółko).
+    Pozycja: droga z licznika zboczy × kierunek z żyroskopu. Granica okrążenia: kurs od startu
+    przekracza kolejne wielokrotności 360° (w kierunku jazdy). Okrążenia z drogą odbiegającą od
+    mediany o > race_lap_dist_tol (buksowanie, uderzenie) – odrzucone. Tor = średnia dobrych
+    okrążeń przepróbkowanych po drodze i dopasowanych (obrót + przesunięcie) do wzorca."""
+    n = len(ds)
+    x, y = [0.0] * n, [0.0] * n
+    for i in range(1, n):
+        a = math.radians(heading[i])
+        x[i] = x[i - 1] + ds[i] * math.cos(a)
+        y[i] = y[i - 1] + ds[i] * math.sin(a)
+    direction = 1.0 if heading[i1] - heading[i0] >= 0 else -1.0
+    bounds = [i0]
+    k = 1
+    for i in range(i0, i1 + 1):
+        if (heading[i] - heading[i0]) * direction >= 360.0 * k:
+            bounds.append(i)
+            k += 1
+    laps = []
+    for j in range(len(bounds) - 1):
+        a, b = bounds[j], bounds[j + 1]
+        laps.append(dict(i_a=a, i_b=b, t_start=float(t[a]), time_s=float(t[b] - t[a]),
+                         dist_m=float(sum(ds[a + 1:b + 1])),
+                         v_max=float(max(v_track[a:b + 1])), good=False, err_m=float("nan")))
+    if len(laps) < 2:
+        return laps, None
+    dists = sorted(lp["dist_m"] for lp in laps)
+    m = len(dists)
+    med = dists[m // 2] if m % 2 else 0.5 * (dists[m // 2 - 1] + dists[m // 2])
+    tol = float(cfg["race_lap_dist_tol"])
+    for lp in laps:
+        lp["good"] = abs(lp["dist_m"] - med) < tol * med
+    good = [j for j, lp in enumerate(laps) if lp["good"]]
+    if not good:
+        return laps, None
+    npts = int(cfg["race_track_points"])
+    rs = []
+    for lp in laps:
+        a, b = lp["i_a"], lp["i_b"]
+        d = [0.0]
+        for i in range(a + 1, b + 1):
+            d.append(d[-1] + ds[i])
+        q = [d[-1] * k / (npts - 1) for k in range(npts)]
+        rs.append((interp_lin(q, d, x[a:b + 1]), interp_lin(q, d, y[a:b + 1]),
+                   interp_lin(q, d, v_track[a:b + 1])))
+    jref = good[0]
+    for j in good:
+        if abs(laps[j]["dist_m"] - med) < abs(laps[jref]["dist_m"] - med):
+            jref = j
+    rx, ry = rs[jref][0], rs[jref][1]
+    al = []
+    for _ in range(3):
+        al = [align_2d(rs[j][0], rs[j][1], rx, ry) for j in range(len(laps))]
+        rx = [sum(al[j][0][k] for j in good) / len(good) for k in range(npts)]
+        ry = [sum(al[j][1][k] for j in good) / len(good) for k in range(npts)]
+    for j, lp in enumerate(laps):
+        lp["err_m"] = sum(math.hypot(al[j][0][k] - rx[k], al[j][1][k] - ry[k]) for k in range(npts)) / npts
+    tv = [sum(rs[j][2][k] for j in good) / len(good) for k in range(npts)]
+    length = sum(math.hypot(rx[k] - rx[k - 1], ry[k] - ry[k - 1]) for k in range(1, npts))
+    track = dict(x=rx, y=ry, v=tv, length_m=length,
+                 laps_x=[al[j][0] for j in range(len(laps))], laps_y=[al[j][1] for j in range(len(laps))],
+                 laps_v=[rs[j][2] for j in range(len(laps))])
+    return laps, track
 
 
 def analyze_file(path, cfg=None):

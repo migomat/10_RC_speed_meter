@@ -240,7 +240,7 @@ N_CHECK = 60
 RACE_SCENARIOS = {
     "race_oval": dict(laps=5, straight=12.0, radius=3.0, v_straight=11.0, v_turn=5.5,
                       hall_lines=1, end_reason=3, tail_s=5.0, padding=0, gap_at=None, seq=21),
-    "race_recovered": dict(laps=2, straight=10.0, radius=2.5, v_straight=9.0, v_turn=5.0,
+    "race_recovered": dict(laps=3, straight=10.0, radius=2.5, v_straight=9.0, v_turn=5.0,
                            hall_lines=3, end_reason=2, tail_s=2.0, padding=37, gap_at=400, seq=22),
 }
 
@@ -363,7 +363,13 @@ def race_expected_for(data: bytes, cfg: dict) -> dict:
         check_idx=idx,
         series={k: [clean(sr[k][i]) for i in idx]
                 for k in ("t", "throttle_pct", "rpm", "v_front", "d_front", "a_long", "a_lat",
-                          "yaw_rate", "heading_deg")},
+                          "yaw_rate", "heading_deg", "v_track")},
+        laps=[{k: (clean(v) if isinstance(v, float) else v) for k, v in lp.items()} for lp in res["laps"]],
+        track=None if not res["track"] else dict(
+            length_m=res["track"]["length_m"],
+            x=[res["track"]["x"][k] for k in range(0, len(res["track"]["x"]), 20)],
+            y=[res["track"]["y"][k] for k in range(0, len(res["track"]["y"]), 20)],
+            v=[res["track"]["v"][k] for k in range(0, len(res["track"]["v"]), 20)]),
     )
 
 
@@ -432,7 +438,8 @@ def main(argv=None):
         m = exp["metrics"]
         print(f"{name:20s} {m['duration_s']:.1f} s  droga {m['distance_m']:.1f} m (prawda "
               f"{truth['distance_m']:.1f})  kurs {m['heading_total_deg']:.0f}° "
-              f"(prawda {truth['heading_total_deg']:.0f})  vmax {m['v_front_max']:.2f}")
+              f"(prawda {truth['heading_total_deg']:.0f})  vmax {m['v_front_max']:.2f}  okrążenia "
+              f"{m['laps_n']}, tor {m['track_length_m'] or 0:.2f} m (prawda {truth['lap_m']:.2f})")
     (out / "races.json").write_text(json.dumps(races, indent=1))
     (demo / "races.json").write_text(json.dumps(races, indent=1))
 

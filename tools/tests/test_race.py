@@ -35,6 +35,15 @@ def test_race_matches_expected(name):
         for i, v in zip(exp["check_idx"], vals):
             assert close(float(res["series"][k][i]), v), f"{k}[{i}]"
     assert res["end_reason"] == exp["end_reason"]
+    assert len(res["laps"]) == len(exp["laps"])
+    for got, e in zip(res["laps"], exp["laps"]):
+        assert (got["i_a"], got["i_b"], got["good"]) == (e["i_a"], e["i_b"], e["good"])
+        for k in ("time_s", "dist_m", "v_max", "err_m"):
+            assert close(got[k], e[k]), f"lap {k}"
+    assert close(res["track"]["length_m"], exp["track"]["length_m"])
+    for k in ("x", "y", "v"):
+        for g, e in zip(res["track"][k][::20], exp["track"][k]):
+            assert close(g, e, abs_=2e-3), f"track {k}"
 
 
 @pytest.mark.parametrize("name", RACES)
@@ -46,6 +55,9 @@ def test_race_physics_sanity(name):
     assert tr["distance_m"] <= m["distance_m"] < tr["distance_m"] + 3.0
     # kurs z żyroskopu po korekcie biasu z postoju: N × 360°
     assert abs(m["heading_total_deg"] - tr["heading_total_deg"]) < 10.0
+    # tor: długość okrążenia jak w symulacji, okrążenia (poza pierwszym z dojazdem) dobre
+    assert abs(m["track_length_m"] - tr["lap_m"]) < 0.01 * tr["lap_m"]
+    assert m["laps_n"] in (tr["laps"] - 1, tr["laps"])   # ostatnie 360° zależy od szumu żyroskopu
 
 
 def test_race_kind_crc_and_padding():

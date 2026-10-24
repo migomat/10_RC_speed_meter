@@ -15,6 +15,9 @@ export const DEFAULT_SETTINGS = {
   rest_acc_std_g: 0.06,   // po filtrze lowpass_hz (drgania wentylatora ESC ~0,03–0,05 g)
   edge_min_us: 300,       // [µs] min. odstęp zboczy linii (drgnięcia wirnika przy ruszaniu)
   race_lowpass_hz: 5,     // [Hz] filtr przyspieszeń w analizie wyścigu (próbki 50 Hz)
+  race_lap_dist_tol: 0.2, // okrążenie z drogą ±20 % od mediany = odrzucone (buksowanie, uderzenie)
+  race_track_points: 200, // punkty toru (przepróbkowanie okrążeń po drodze)
+  race_track_v_lowpass_hz: 2, // [Hz] wygładzanie prędkości z licznika zboczy (mapa toru)
   estimator: { ...DEFAULT_EST_PARAMS },
 };
 
@@ -504,9 +507,124 @@ export function analyzeRace(race, settings) {
     heading_total_deg: heading[iLast] - heading[ti],
     gaps,
   };
+  const ds = new Float64Array(n), vRaw = new Float64Array(n);
+  for (let i = 0; i < n; i++) { ds[i] = race.edges[i] / epr * mPerRev; vRaw[i] = ds[i] / dt[i]; }
+  const vTrack = filtfiltButter2(vRaw, cfg.race_track_v_lowpass_hz, fs);
+  const { laps, track } = raceLaps(ds, heading, vTrack, t, ti, iLast, cfg);
+  const good = laps.filter((lp) => lp.good);
+  metrics.laps_n = laps.length;
+  metrics.best_lap_s = good.length ? Math.min(...good.map((lp) => lp.time_s)) : NaN;
+  metrics.track_length_m = track ? track.length_m : NaN;
   const series = { t, throttle_pct: thrPct, rpm, v_front: vFront, d_front: dFront,
-    a_long: aLong, a_lat: aLat, yaw_rate: yawRate, heading_deg: heading };
-  return { series, metrics, warnings, header: h, end_reason: race.end_reason, i_start: ti, i_last: iLast };
+    a_long: aLong, a_lat: aLat, yaw_rate: yawRate, heading_deg: heading, v_track: vTrack };
+  return { series, metrics, warnings, header: h, end_reason: race.end_reason, i_start: ti, i_last: iLast, laps, track };
+}
+
+// Interpolacja liniowa dla rosnących xq (xp niemalejące) – jak interp_lin() w analyze.py.
+export function interpLin(xq, xp, fp) {
+  const out = new Float64Array(xq.length);
+  let k = 0;
+  const m = xp.length;
+  for (let j = 0; j < xq.length; j++) {
+    const x = xq[j];
+    while (k < m - 1 && xp[k] < x) k++;
+    if (k === 0 || xp[k] < x) out[j] = fp[k];
+    else if (xp[k] === xp[k - 1]) out[j] = fp[k];
+    else out[j] = fp[k - 1] + (x - xp[k - 1]) / (xp[k] - xp[k - 1]) * (fp[k] - fp[k - 1]);
+  }
+  return out;
+}
+
+// Obrót + przesunięcie punktów P na wzorzec R – jak align_2d() w analyze.py.
+function align2d(px, py, rx, ry) {
+  const n = px.length;
+  let pcx = 0, pcy = 0, rcx = 0, rcy = 0;
+  for (let i = 0; i < n; i++) pcx += px[i];
+  for (let i = 0; i < n; i++) pcy += py[i];
+  for (let i = 0; i < n; i++) rcx += rx[i];
+  for (let i = 0; i < n; i++) rcy += ry[i];
+  pcx /= n; pcy /= n; rcx /= n; rcy /= n;
+  let sc = 0, ss = 0;
+  for (let i = 0; i < n; i++) {
+    const ax = px[i] - pcx, ay = py[i] - pcy, bx = rx[i] - rcx, by = ry[i] - rcy;
+    sc += ax * bx + ay * by;
+    ss += ax * by - ay * bx;
+  }
+  const th = Math.atan2(ss, sc), c = Math.cos(th), s = Math.sin(th);
+  const ox = new Float64Array(n), oy = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    ox[i] = c * (px[i] - pcx) - s * (py[i] - pcy) + rcx;
+    oy[i] = s * (px[i] - pcx) + c * (py[i] - pcy) + rcy;
+  }
+  return [ox, oy];
+}
+
+// Okrążenia i tor – port race_laps() z analyze.py (opis tam).
+export function raceLaps(ds, heading, vTrack, t, i0, i1, cfg) {
+  const n = ds.length;
+  const x = new Float64Array(n), y = new Float64Array(n);
+  for (let i = 1; i < n; i++) {
+    const a = heading[i] * (Math.PI / 180);
+    x[i] = x[i - 1] + ds[i] * Math.cos(a);
+    y[i] = y[i - 1] + ds[i] * Math.sin(a);
+  }
+  const dir = heading[i1] - heading[i0] >= 0 ? 1 : -1;
+  const bounds = [i0];
+  let k = 1;
+  for (let i = i0; i <= i1; i++) {
+    if ((heading[i] - heading[i0]) * dir >= 360 * k) { bounds.push(i); k++; }
+  }
+  const laps = [];
+  for (let j = 0; j < bounds.length - 1; j++) {
+    const a = bounds[j], b = bounds[j + 1];
+    let d = 0, vmax = -Infinity;
+    for (let i = a + 1; i <= b; i++) d += ds[i];
+    for (let i = a; i <= b; i++) if (vTrack[i] > vmax) vmax = vTrack[i];
+    laps.push({ i_a: a, i_b: b, t_start: t[a], time_s: t[b] - t[a], dist_m: d, v_max: vmax, good: false, err_m: NaN });
+  }
+  if (laps.length < 2) return { laps, track: null };
+  const dists = laps.map((lp) => lp.dist_m).sort((p, q) => p - q);
+  const m = dists.length;
+  const med = m % 2 ? dists[(m - 1) / 2] : 0.5 * (dists[m / 2 - 1] + dists[m / 2]);
+  for (const lp of laps) lp.good = Math.abs(lp.dist_m - med) < cfg.race_lap_dist_tol * med;
+  const good = [];
+  laps.forEach((lp, j) => { if (lp.good) good.push(j); });
+  if (!good.length) return { laps, track: null };
+  const npts = cfg.race_track_points;
+  const rs = laps.map((lp) => {
+    const a = lp.i_a, b = lp.i_b;
+    const d = new Float64Array(b - a + 1);
+    for (let i = a + 1; i <= b; i++) d[i - a] = d[i - a - 1] + ds[i];
+    const q = new Float64Array(npts);
+    for (let kk = 0; kk < npts; kk++) q[kk] = d[d.length - 1] * kk / (npts - 1);
+    return [interpLin(q, d, x.subarray(a, b + 1)), interpLin(q, d, y.subarray(a, b + 1)), interpLin(q, d, vTrack.subarray(a, b + 1))];
+  });
+  let jref = good[0];
+  for (const j of good) if (Math.abs(laps[j].dist_m - med) < Math.abs(laps[jref].dist_m - med)) jref = j;
+  let rx = rs[jref][0], ry = rs[jref][1];
+  let al = [];
+  for (let it = 0; it < 3; it++) {
+    al = laps.map((_, j) => align2d(rs[j][0], rs[j][1], rx, ry));
+    const nx = new Float64Array(npts), ny = new Float64Array(npts);
+    for (let kk = 0; kk < npts; kk++) {
+      let sx = 0, sy = 0;
+      for (const j of good) sx += al[j][0][kk];
+      for (const j of good) sy += al[j][1][kk];
+      nx[kk] = sx / good.length; ny[kk] = sy / good.length;
+    }
+    rx = nx; ry = ny;
+  }
+  laps.forEach((lp, j) => {
+    let e = 0;
+    for (let kk = 0; kk < npts; kk++) e += Math.hypot(al[j][0][kk] - rx[kk], al[j][1][kk] - ry[kk]);
+    lp.err_m = e / npts;
+  });
+  const tv = new Float64Array(npts);
+  for (let kk = 0; kk < npts; kk++) { let sv = 0; for (const j of good) sv += rs[j][2][kk]; tv[kk] = sv / good.length; }
+  let length = 0;
+  for (let kk = 1; kk < npts; kk++) length += Math.hypot(rx[kk] - rx[kk - 1], ry[kk] - ry[kk - 1]);
+  return { laps, track: { x: rx, y: ry, v: tv, length_m: length,
+    laps_x: al.map((a) => a[0]), laps_y: al.map((a) => a[1]), laps_v: rs.map((r) => r[2]) } };
 }
 
 export const RACE_METRIC_LABELS = {
@@ -521,6 +639,9 @@ export const RACE_METRIC_LABELS = {
   full_throttle_frac: ['pełny gaz', '%'],
   heading_total_deg: ['suma skrętu', '°'],
   gaps: ['przerwy w zapisie', ''],
+  laps_n: ['okrążenia', ''],
+  best_lap_s: ['najlepsze okrążenie', 's'],
+  track_length_m: ['długość toru', 'm'],
 };
 
 export const METRIC_LABELS = {

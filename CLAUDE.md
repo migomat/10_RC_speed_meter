@@ -662,8 +662,8 @@ połowy flash. Szczegóły formatu: `docs/FORMAT.md`, komendy: `docs/PROTOCOL.md
   u odbiorcy); `RERASE FORCE` – tylko świadomie (obce dane w obszarze).
 - Zanik zasilania w trakcie wyścigu to normalne zakończenie – rekord domykany przy starcie.
 - Analiza: `analyze_race` (Python) = `analyzeRace` (JS), wspólne wektory `test_vectors/race_*`.
-- Następny krok: podział na okrążenia (tor stały) – dopasowanie okrążeń po kursie z żyroskopu
-  i profilu prędkości, po zebraniu prawdziwych danych.
+- Okrążenia i mapa toru: `race_laps` / `raceLaps` – granice co 360° kursu z żyroskopu, pozycja
+  z drogi kół, tor = średnia dopasowanych okrążeń (opis w README). Wektory zawierają okrążenia i tor.
 
 ## Zasady dla agenta
 

@@ -6,9 +6,9 @@ import { Device, BusyError } from './protocol.js';
 import { parseRun, parseHeader, parseRace, toBase64, fromBase64, RF, fwVersionString, RACE_END_NAMES } from './format.js';
 import { analyze, analyzeRace, mergeSettings, DEFAULT_SETTINGS, METRIC_LABELS, RACE_METRIC_LABELS, interpAt } from './analysis.js';
 import * as db from './storage.js';
-import { syncedCharts, scatterChart, PALETTE } from './charts.js';
+import { syncedCharts, scatterChart, trackMap, PALETTE } from './charts.js';
 
-const APP_VERSION = '1.1.1';
+const APP_VERSION = '1.2.0';
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '–' : v.toFixed(d).replace('.', ','));
 
@@ -618,6 +618,8 @@ function raceMetricValue(k, v) {
   if (k === 'duration_s') return mmss(v);
   if (k === 'rpm_max' || k === 'heading_total_deg' || k === 'gaps' || k === 'distance_m') return fmt(v, 0);
   if (k === 'full_throttle_frac') return fmt(v * 100, 0);
+  if (k === 'laps_n') return fmt(v, 0);
+  if (k === 'track_length_m') return fmt(v, 1);
   return fmt(v, 2);
 }
 
@@ -676,11 +678,59 @@ async function openRace(id) {
     { label: 'skręt', unit: '°/s', height: 130, series: [{ label: 'prędkość skrętu', values: s.yaw_rate, color: PALETTE[3] }] },
   ], { syncKey: 'race' });
   setRaceRange('all');
+  state.raceLap = -1;
+  renderRaceTrack(res);
   $('raceMetrics').innerHTML = Object.entries(RACE_METRIC_LABELS).map(([k, [label, unit]]) => {
     let val = raceMetricValue(k, res.metrics[k]), u = unit;
     if (k === 'v_front_max' || k === 'v_front_avg') { val = fmt(speedConv(res.metrics[k]), 1); u = state.speedUnit === 'kmh' ? 'km/h' : 'm/s'; }
     return `<div class="metric"><div class="l">${label}</div><div class="v">${val} <span class="small muted">${u}</span></div></div>`;
   }).join('');
+}
+
+// Mapa toru + tabela okrążeń; dotknięcie wiersza = to okrążenie na mapie i na wykresach
+function renderRaceTrack(res) {
+  const card = $('raceTrackCard');
+  const laps = res.laps || [];
+  if (!res.track) {
+    $('raceTrackTitle').textContent = 'Tor';
+    show($('raceTrack'), false);
+    $('raceTrackNote').textContent = laps.length < 2
+      ? 'Za mało okrążeń do narysowania toru (potrzebne co najmniej 2 pełne okrążenia w kółko).'
+      : 'Nie udało się wyznaczyć toru.';
+    $('raceLaps').innerHTML = '';
+    show(card, true);
+    return;
+  }
+  show($('raceTrack'), true);
+  const good = laps.map((lp, j) => (lp.good ? j : -1)).filter((j) => j >= 0);
+  const best = res.metrics.best_lap_s;
+  const unit = state.speedUnit === 'kmh' ? 'km/h' : 'm/s';
+  const sel = state.raceLap;
+  $('raceTrackTitle').textContent = sel >= 0 ? `Tor – okrążenie ${sel + 1}` : `Tor – średnia z ${good.length} okrążeń`;
+  trackMap($('raceTrack'), res.track, { lap: sel, goodLaps: good, vConv: speedConv, unit });
+  $('raceTrackNote').textContent = `Długość toru ok. ${fmt(res.track.length_m, 1)} m. Kolor = prędkość, kropka = początek okrążenia, strzałka = kierunek jazdy. ` +
+    'Pozycja z kierunku (żyroskop) i drogi kół – okrążenia z buksowaniem lub uderzeniem (droga ±20 % od typowej) są pomijane w średniej.';
+  let html = `<table><tr><th>#</th><th>czas</th><th>strata</th><th>droga</th><th>v maks.</th></tr>`;
+  html += `<tr class="lap${sel < 0 ? ' sel' : ''}" data-lap="-1"><td colspan="5">tor średni · czas [s], droga [m], v [${unit}]</td></tr>`;
+  laps.forEach((lp, j) => {
+    const isBest = lp.good && lp.time_s === best;
+    html += `<tr class="lap${lp.good ? '' : ' bad'}${sel === j ? ' sel' : ''}" data-lap="${j}"><td>${j + 1}</td>` +
+      `<td class="${isBest ? 'best' : ''}">${fmt(lp.time_s, 2)}</td><td>${lp.good ? (isBest ? '★' : '+' + fmt(lp.time_s - best, 2)) : 'pominięte'}</td>` +
+      `<td>${fmt(lp.dist_m, 1)}</td><td>${fmt(speedConv(lp.v_max), 1)}</td></tr>`;
+  });
+  $('raceLaps').innerHTML = html + '</table>';
+  $('raceLaps').querySelectorAll('tr.lap').forEach((tr) => {
+    tr.onclick = () => {
+      const j = Number(tr.dataset.lap);
+      state.raceLap = j;
+      renderRaceTrack(res);
+      if (j >= 0 && state.raceCharts) {
+        const lp = laps[j];
+        state.raceCharts.setRange(lp.t_start, lp.t_start + lp.time_s);
+      } else setRaceRange('all');
+    };
+  });
+  show(card, true);
 }
 
 function setRaceRange(r) {

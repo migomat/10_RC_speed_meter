@@ -34,6 +34,16 @@ for (const name of races) {
     assert.equal(res.i_start, exp.i_start);
     assert.equal(res.i_last, exp.i_last);
     assert.deepEqual(res.warnings, exp.warnings);
+    assert.equal(res.laps.length, exp.laps.length);
+    res.laps.forEach((lp, j) => {
+      const e = exp.laps[j];
+      assert.deepEqual([lp.i_a, lp.i_b, lp.good], [e.i_a, e.i_b, e.good]);
+      for (const k of ['time_s', 'dist_m', 'v_max', 'err_m']) assert.ok(close(lp[k], e[k]), `lap ${j} ${k}: ${lp[k]} != ${e[k]}`);
+    });
+    assert.ok(close(res.track.length_m, exp.track.length_m));
+    for (const k of ['x', 'y', 'v']) {
+      exp.track[k].forEach((v, j) => assert.ok(close(res.track[k][j * 20], v, 0.01, 2e-3), `track ${k}[${j * 20}]`));
+    }
   });
 }
 
