@@ -8,7 +8,7 @@ import { analyze, analyzeRace, mergeSettings, DEFAULT_SETTINGS, METRIC_LABELS, R
 import * as db from './storage.js';
 import { syncedCharts, scatterChart, PALETTE } from './charts.js';
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '–' : v.toFixed(d).replace('.', ','));
 
@@ -965,6 +965,14 @@ async function init() {
     if (document.visibilityState === 'visible' && (currentView === 'speed' || state.downloading)) wakeLock(true);
   });
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    // Nowa wersja aplikacji przejęła stronę → jednorazowe przeładowanie (nie w trakcie pobierania)
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!hadController || reloaded || state.downloading || state.device) return;
+      reloaded = true;
+      location.reload();
+    });
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   renderSettings();

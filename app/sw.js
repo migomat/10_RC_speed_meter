@@ -1,6 +1,6 @@
 // Service worker – praca offline. Wszystkie zasoby lokalne (bez CDN).
 // Zmiana dowolnego pliku aplikacji = podbicie CACHE.
-const CACHE = 'x4f-v1.1.0';
+const CACHE = 'x4f-v1.1.1';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './vendor/uPlot.iife.min.js', './vendor/uPlot.min.css',
@@ -13,7 +13,11 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
+  // cache: 'reload' – z pominięciem pamięci HTTP przeglądarki (GitHub Pages: max-age 600),
+  // inaczej nowa wersja mogła się zainstalować ze starymi plikami.
+  e.waitUntil(caches.open(CACHE)
+    .then((c) => c.addAll(ASSETS.map((u) => new Request(u, { cache: 'reload' }))))
+    .then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
@@ -22,17 +26,19 @@ self.addEventListener('activate', (e) => {
     .then(() => self.clients.claim()));
 });
 
-// Najpierw pamięć podręczna (działanie na torze bez zasięgu), w tle odświeżenie.
+// Najpierw sieć (z internetem zawsze najnowsza wersja), po 3 s albo bez sieci –
+// pamięć podręczna (działanie na torze bez zasięgu).
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
-  e.respondWith(caches.match(e.request, { ignoreSearch: true }).then((hit) => {
-    const net = fetch(e.request).then((res) => {
-      if (res.ok) {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(e.request, copy));
-      }
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const hit = await cache.match(e.request, { ignoreSearch: true });
+    const net = fetch(e.request, { cache: 'no-cache' }).then((res) => {
+      if (res.ok) cache.put(e.request, res.clone());
       return res;
-    }).catch(() => hit);
-    return hit || net;
-  }));
+    });
+    if (!hit) return net;
+    const timeout = new Promise((r) => setTimeout(() => r(hit), 3000));
+    try { return await Promise.race([net, timeout]); } catch (err) { return hit; }
+  })());
 });
