@@ -52,7 +52,7 @@ export async function hasRun(id) { return !!(await getRun(id)); }
 export async function updateRun(id, patch) {
   const r = await getRun(id);
   if (!r) return;
-  Object.assign(r, patch);
+  Object.assign(r, patch, { updated_at: Date.now() });   // updated_at – konflikty synchronizacji
   await putRun(r);
 }
 
@@ -68,7 +68,7 @@ export async function hasRace(id) { return !!(await getRace(id)); }
 export async function updateRace(id, patch) {
   const r = await getRace(id);
   if (!r) return;
-  Object.assign(r, patch);
+  Object.assign(r, patch, { updated_at: Date.now() });
   await putRace(r);
 }
 
@@ -81,6 +81,13 @@ export async function pushRecentTag(tag) {
   const t = (await recentTags()).filter((x) => x !== tag);
   t.unshift(tag);
   await kvSet('recent_tags', t.slice(0, 8));
+}
+
+/** Usunięcie lokalne zapamiętane dla synchronizacji (inne urządzenia też usuną). */
+export async function addTombstone(dir, id) {
+  const t = (await kvGet('sync_deleted')) || [];
+  t.push({ dir, id });
+  await kvSet('sync_deleted', t);
 }
 
 export async function clearAll() {

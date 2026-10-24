@@ -665,6 +665,12 @@ połowy flash. Szczegóły formatu: `docs/FORMAT.md`, komendy: `docs/PROTOCOL.md
 - Okrążenia i mapa toru: `race_laps` / `raceLaps` – granice co 360° kursu z żyroskopu, pozycja
   z drogi kół, tor = średnia dopasowanych okrążeń (opis w README). Wektory zawierają okrążenia i tor.
 
+## Synchronizacja (aplikacja 1.3)
+
+Wspólne dane telefonu i komputera przez prywatne repo GitHub (`app/js/sync.js`, opis w README).
+Surowe pliki w repo są niezmienne; usunięcie w aplikacji = znacznik `deleted` w metadanych.
+Token tylko na urządzeniu – nigdy w eksporcie ani w kodzie.
+
 ## Zasady dla agenta
 
 - Nie zmieniać założenia, że urządzenie tylko słucha – żadnego wyjścia do ESC.

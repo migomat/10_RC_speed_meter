@@ -91,6 +91,23 @@ Obok startów (500 Hz, 4 s, bufor pierścieniowy) Xiao nagrywa **całe wyścigi*
   Salon 2026-10-24: 16 okrążeń, tor ok. 11,8 m, najlepsze 6,00 s; Python = JS z dokładnością 1e-14.
   Ograniczenie: buksowanie zawyża drogę (tor surowy „odpływa”), dlatego dopasowanie okrążeń.
 
+## Synchronizacja między urządzeniami (GitHub)
+
+Dane aplikacji leżą w IndexedDB danej przeglądarki. Wspólne wyniki na telefonie i komputerze
+zapewnia synchronizacja przez **prywatne repozytorium** `migomat/x4f-dane` (`app/js/sync.js`):
+
+* Układ: `runs/<id>.bin` + `runs/<id>.json`, `races/<id>.bin` + `races/<id>.json` – surowy plik
+  (niezmienny) i metadane (tag, notatka, `updated_at`; `deleted: true` po usunięciu na urządzeniu).
+* Jedna synchronizacja = najwyżej jeden commit (Git Data API: bloby → drzewo → commit → ref bez force;
+  równoczesny commit innego urządzenia → ponowienie). Konflikt metadanych: nowszy `updated_at`.
+* Usunięcie w aplikacji usuwa nagranie na pozostałych urządzeniach; surowy plik zostaje w repo (kopia).
+* Token: fine-grained PAT ograniczony do `x4f-dane`, *Contents: read and write*; zapisywany tylko
+  w IndexedDB urządzenia, nie trafia do eksportu JSON. Instrukcja w aplikacji (*Ustawienia*).
+* Automatycznie przy otwarciu aplikacji i po pobraniu z Xiao (gdy jest internet), ręcznie przyciskiem.
+* Python: `git clone git@github.com:migomat/x4f-dane.git` – pliki `.bin` czytają bezpośrednio
+  `rc_launch.analyze` / `plot` / `compare`.
+* Test: `app/test/sync.test.mjs` – dwa urządzenia przez atrapę API GitHub.
+
 ## Ustalenia sprzętowe (sprawdzone w źródłach i na płytce)
 
 | Temat | Wniosek |

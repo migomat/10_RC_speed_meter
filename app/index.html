@@ -95,6 +95,7 @@
     <div class="card row">
       <select id="runsFilter"><option value="">wszystkie tagi</option></select>
       <span id="runsCount" class="muted"></span>
+      <button id="runsSync" class="hidden">⟳ Synchronizuj</button>
     </div>
     <div id="runsList" class="list"></div>
   </section>
@@ -133,6 +134,7 @@
   <section id="view-races" class="view">
     <div class="card row">
       <span id="racesCount" class="muted"></span>
+      <button id="racesSync" class="hidden">⟳ Synchronizuj</button>
     </div>
     <div id="racesList" class="list"></div>
   </section>
@@ -215,6 +217,25 @@
     <div class="card">
       <h2>Wygląd</h2>
       <select id="setTheme"><option value="auto">automatycznie</option><option value="light">jasny</option><option value="dark">ciemny</option></select>
+    </div>
+    <div class="card">
+      <h2>Synchronizacja (GitHub)</h2>
+      <p class="muted small">Starty i wyścigi wspólne dla telefonu i komputera – przez prywatne repozytorium na GitHubie. Token zostaje tylko na tym urządzeniu.</p>
+      <label>Repozytorium (właściciel/nazwa)<input id="syncRepo" placeholder="migomat/x4f-dane" autocomplete="off" autocapitalize="off"></label>
+      <label>Token GitHub<input id="syncToken" type="password" autocomplete="off" placeholder="github_pat_…"></label>
+      <label class="switch"><input type="checkbox" id="syncAuto"> automatycznie – przy otwarciu i po pobraniu z Xiao</label>
+      <div class="btnrow"><button id="syncSave" class="primary">Zapisz</button><button id="syncNow">Synchronizuj teraz</button></div>
+      <p id="syncMsg" class="muted small"></p>
+      <details>
+        <summary>Jak zdobyć token</summary>
+        <ol class="small">
+          <li>github.com → zdjęcie profilu → <b>Settings</b> → <b>Developer settings</b> → <b>Personal access tokens</b> → <b>Fine-grained tokens</b> → <b>Generate new token</b>.</li>
+          <li>Nazwa np. „x4f”, ważność np. 1 rok.</li>
+          <li><b>Repository access</b>: <i>Only select repositories</i> → <b>x4f-dane</b>.</li>
+          <li><b>Permissions → Repository permissions → Contents</b>: <i>Read and write</i>.</li>
+          <li><b>Generate token</b>, skopiuj i wklej tutaj – na każdym urządzeniu (telefon, komputer).</li>
+        </ol>
+      </details>
     </div>
     <div class="card">
       <h2>Kopia zapasowa</h2>

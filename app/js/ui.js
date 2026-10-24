@@ -7,8 +7,9 @@ import { parseRun, parseHeader, parseRace, toBase64, fromBase64, RF, fwVersionSt
 import { analyze, analyzeRace, mergeSettings, DEFAULT_SETTINGS, METRIC_LABELS, RACE_METRIC_LABELS, interpAt } from './analysis.js';
 import * as db from './storage.js';
 import { syncedCharts, scatterChart, trackMap, PALETTE } from './charts.js';
+import { GitHubStore, syncAll } from './sync.js';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '–' : v.toFixed(d).replace('.', ','));
 
@@ -23,6 +24,8 @@ const state = {
   raceInfo: null,              // RLIST (protokół ≥ 2)
   currentRace: null,
   raceCharts: null,
+  sync: null,                  // {repo, token, auto} – tylko na tym urządzeniu (kv 'sync')
+  syncing: false,
   lastStatus: null,
   live: { on: false, last: 0, data: null },
   speedUnit: 'kmh',
@@ -351,6 +354,7 @@ async function downloadAll() {
   if (batch.length) {
     state.lastBatch = batch;
     await showTagBatch();
+    if (state.sync && state.sync.auto) doSync({ quiet: true });
   }
   return failed;
 }
@@ -874,15 +878,72 @@ function applyTheme(t) {
   else document.documentElement.setAttribute('data-theme', t);
 }
 
+// ------------------------------------------------------------------ synchronizacja (GitHub)
+const syncConfigured = () => !!(state.sync && state.sync.repo && state.sync.token);
+
+function setSyncMsg(t) { $('syncMsg').textContent = t; }
+
+function renderSyncButtons() {
+  for (const id of ['racesSync', 'runsSync']) {
+    show($(id), syncConfigured());
+    $(id).disabled = state.syncing;
+  }
+}
+
+async function doSync({ quiet = false } = {}) {
+  if (!syncConfigured()) { if (!quiet) toast('Ustaw synchronizację w Ustawieniach'); return; }
+  if (state.syncing || state.downloading) return;
+  if (!navigator.onLine) { if (!quiet) toast('Brak internetu – synchronizacja później'); return; }
+  state.syncing = true;
+  renderSyncButtons();
+  setSyncMsg('Synchronizacja…');
+  try {
+    const st = await syncAll(new GitHubStore({ repo: state.sync.repo, token: state.sync.token }), db, {
+      device: /Android|iPhone/i.test(navigator.userAgent) ? 'telefonu' : 'komputera', onProgress: setSyncMsg,
+    });
+    const parts = [];
+    if (st.up) parts.push(`wysłano ${st.up}`);
+    if (st.down) parts.push(`pobrano ${st.down}`);
+    if (st.meta) parts.push(`zmiany opisów ${st.meta}`);
+    if (st.deleted) parts.push(`usunięto ${st.deleted}`);
+    const msg = parts.length ? `Zsynchronizowano: ${parts.join(', ')}.` : 'Wszystko zsynchronizowane.';
+    setSyncMsg(`${msg} (${new Date().toLocaleTimeString('pl-PL')})`);
+    if (!quiet || parts.length) toast(msg);
+    if (parts.length) {
+      if (currentView === 'runs') renderRunsList();
+      if (currentView === 'races') renderRacesList();
+    }
+  } catch (e) {
+    setSyncMsg(`Błąd synchronizacji: ${e.message}`);
+    if (!quiet) toast(e.message, 4000);
+  } finally {
+    state.syncing = false;
+    renderSyncButtons();
+  }
+}
+
+async function saveSync() {
+  const repo = $('syncRepo').value.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '');
+  const token = $('syncToken').value.trim();
+  if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) { setSyncMsg('Repozytorium w postaci właściciel/nazwa, np. migomat/x4f-dane.'); return; }
+  state.sync = { repo, token, auto: $('syncAuto').checked };
+  await db.kvSet('sync', state.sync);
+  renderSyncButtons();
+  setSyncMsg(syncConfigured() ? 'Zapisano.' : 'Zapisano – synchronizacja wyłączona (brak repozytorium albo tokenu).');
+  if (syncConfigured()) doSync();
+}
+
 // ------------------------------------------------------------------ eksport / import bazy
+const stripSync = (r) => { const o = { ...r }; delete o.sync_meta; delete o.sync_meta_sha; return o; };
+
 async function exportDb() {
   const runs = await db.allRuns();
   const races = await db.allRaces();
   const out = {
     app: 'x4f-launch-logger', version: 1, exported_at: new Date().toISOString(), settings: state.settings,
     recent_tags: await db.recentTags(),
-    runs: runs.map((r) => ({ ...r, raw: undefined, raw_b64: toBase64(new Uint8Array(r.raw)) })),
-    races: races.map((r) => ({ ...r, raw: undefined, raw_b64: toBase64(new Uint8Array(r.raw)) })),
+    runs: runs.map((r) => ({ ...stripSync(r), raw: undefined, raw_b64: toBase64(new Uint8Array(r.raw)) })),
+    races: races.map((r) => ({ ...stripSync(r), raw: undefined, raw_b64: toBase64(new Uint8Array(r.raw)) })),
   };
   const name = `x4f_baza_${new Date().toISOString().slice(0, 10)}.json`;
   await shareOrDownload(name, JSON.stringify(out), 'application/json');
@@ -898,7 +959,7 @@ async function importDb(file) {
       try {
         const raw = fromBase64(r.raw_b64);
         parseRun(raw);   // weryfikacja CRC
-        const rec = { ...r, raw: raw.buffer };
+        const rec = { ...stripSync(r), raw: raw.buffer };
         delete rec.raw_b64;
         await db.putRun(rec);
         n++;
@@ -909,7 +970,7 @@ async function importDb(file) {
       try {
         const raw = fromBase64(r.raw_b64);
         parseRace(raw);   // weryfikacja CRC
-        const rec = { ...r, raw: raw.buffer };
+        const rec = { ...stripSync(r), raw: raw.buffer };
         delete rec.raw_b64;
         await db.putRace(rec);
         nr++;
@@ -975,6 +1036,7 @@ async function init() {
     const r = state.currentRun;
     if (!r) return;
     await db.deleteRun(r.id);
+    await db.addTombstone('runs', r.id);
     state.analysisCache.delete(r.id);
     toast('Usunięto start');
     goto('runs');
@@ -993,6 +1055,7 @@ async function init() {
     const r = state.currentRace;
     if (!r) return;
     await db.deleteRace(r.id);
+    await db.addTombstone('races', r.id);
     state.analysisCache.delete('race:' + r.id);
     toast('Usunięto wyścig');
     goto('races');
@@ -1002,6 +1065,18 @@ async function init() {
   $('setDefaults').onclick = () => { state.settings = mergeSettings(DEFAULT_SETTINGS); renderSettings(); $('setMsg').textContent = 'Przywrócono domyślne – kliknij Zapisz.'; };
   $('setTheme').onchange = (e) => { localStorage.setItem('x4f_theme', e.target.value); applyTheme(e.target.value); };
   $('dbExport').onclick = () => exportDb();
+  $('syncSave').onclick = () => saveSync();
+  $('syncNow').onclick = () => doSync();
+  $('racesSync').onclick = () => doSync();
+  $('runsSync').onclick = () => doSync();
+  state.sync = (await db.kvGet('sync')) || null;
+  $('syncRepo').value = state.sync ? state.sync.repo : 'migomat/x4f-dane';
+  $('syncToken').value = state.sync ? state.sync.token : '';
+  $('syncAuto').checked = state.sync ? !!state.sync.auto : true;
+  renderSyncButtons();
+  const last = await db.kvGet('sync_last');
+  if (last) setSyncMsg(`Ostatnia synchronizacja: ${new Date(last).toLocaleString('pl-PL')}`);
+  if (syncConfigured() && state.sync.auto) setTimeout(() => doSync({ quiet: true }), 1500);
   $('dbImport').onchange = (e) => { if (e.target.files[0]) importDb(e.target.files[0]); e.target.value = ''; };
 
   const bleOk = WebBluetoothTransport.available();
