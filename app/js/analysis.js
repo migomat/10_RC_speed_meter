@@ -442,8 +442,14 @@ export function analyzeRace(race, settings) {
   const rpm = new Float64Array(n), vFront = new Float64Array(n), dFront = new Float64Array(n);
   let acc = 0;
   for (let i = 0; i < n; i++) {
+    // obroty z okresu; niezgodne z licznikiem zboczy (drgnięcie wirnika) → z liczby zboczy w 2 próbkach
     const p = race.period_rev[i];
-    rpm[i] = p > 0 ? 60e6 / (p * unit) : 0;
+    let rp = p > 0 ? 60e6 / (p * unit) : 0;
+    const e2 = race.edges[i] + (i > 0 ? race.edges[i - 1] : 0);
+    const t2 = dt[i] + (i > 0 ? dt[i - 1] : 0);
+    const exp2 = rp / 60 * epr * t2;
+    if (exp2 >= 6 && e2 < exp2 / 3) rp = e2 / epr / t2 * 60;
+    rpm[i] = rp;
     vFront[i] = rpm[i] / 60 * mPerRev;
     acc += race.edges[i];
     dFront[i] = acc / epr * mPerRev;

@@ -490,7 +490,18 @@ def analyze_race(race: Race, cfg: dict | None = None) -> dict:
     epr = int(h["edges_per_rev"])
     m_per_rev = math.pi * cfg["front_tire_diameter_mm"] * 1e-3 / cfg["final_drive_ratio"]
     unit = float(h["period_unit_us"])
-    rpm = np.array([60e6 / (int(p) * unit) if int(p) > 0 else 0.0 for p in s["period_rev"]])
+    # Obroty z okresu obrotu; niezgodne z licznikiem zboczy (drgnięcie wirnika przy ruszaniu:
+    # kilka zboczy w ~1 ms udaje 60 000 rpm) → obroty z liczby zboczy w 2 próbkach.
+    rpm = np.zeros(n)
+    for i in range(n):
+        p = int(s["period_rev"][i])
+        rp = 60e6 / (p * unit) if p > 0 else 0.0
+        e2 = int(s["edges"][i]) + (int(s["edges"][i - 1]) if i > 0 else 0)
+        t2 = dt[i] + (dt[i - 1] if i > 0 else 0.0)
+        exp2 = rp / 60.0 * epr * t2
+        if exp2 >= 6.0 and e2 < exp2 / 3.0:
+            rp = e2 / epr / t2 * 60.0
+        rpm[i] = rp
     v_front = np.array([float(r) / 60.0 * m_per_rev for r in rpm])
     d_front = np.zeros(n)
     acc = 0
