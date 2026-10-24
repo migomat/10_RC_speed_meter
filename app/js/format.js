@@ -113,6 +113,96 @@ export function parseRun(buf, { verifyCrc = true } = {}) {
   return r;
 }
 
+// ------------------------------------------------------------------ wyścig
+// Plik = RaceHeader (128 B) + n × RaceSample (20 B) + [wypełnienie] + RaceTrailer (16 B).
+// Trailer zawsze na końcu; CRC32 wszystkich bajtów przed polem crc32 trailera.
+export const RACE_MAGIC = 0x4C463458;
+export const RACE_TRAILER_MAGIC = 0x45463458;
+export const SUPPORTED_RACE_FORMAT = 1;
+export const RACE_SAMPLE_SIZE = 20;
+export const RACE_TRAILER_SIZE = 16;
+export const RSF_GAP = 0x40;
+export const RACE_END_NAMES = { 0: 'postój', 1: 'pełna pamięć', 2: 'zanik zasilania', 3: 'komenda RSTOP' };
+
+/** 'run' | 'race' | '' wg magic. */
+export function fileKind(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (u8.length < 4) return '';
+  const m = new DataView(u8.buffer, u8.byteOffset, 4).getUint32(0, true);
+  return m === RUN_MAGIC ? 'run' : m === RACE_MAGIC ? 'race' : '';
+}
+
+export function raceCrc(bytes) {
+  return crc32(bytes.subarray(0, Math.max(0, bytes.length - 4)));
+}
+
+export function parseRaceHeader(buf) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  if (u8.length < HEADER_SIZE) throw new FormatError('Za krótki nagłówek wyścigu');
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const U32 = (o) => dv.getUint32(o, true), U16 = (o) => dv.getUint16(o, true), U8 = (o) => dv.getUint8(o);
+  const h = {
+    magic: U32(0), format_version: U16(4), header_size: U16(6), seq: U32(8), unix_s: U32(12),
+    boot_count: U32(16), uptime_ms: U32(20), hall_lines: U8(24), motor_pole_pairs: U8(25),
+    edges_per_rev: U8(26), throttle_fwd_higher: U8(27), sample_rate_hz: U16(28), imu_odr_hz: U16(30),
+    accel_range_g: U16(32), gyro_range_dps: U16(34), accel_scale_g: dv.getFloat32(36, true),
+    gyro_scale_dps: dv.getFloat32(40, true), throttle_neutral_us: U16(44), throttle_full_us: U16(46),
+    trigger_index: U32(48), tick_rate_hz: U16(52), decim: U16(54), flags: U32(56), t0_us: U32(60),
+    sample_size: U16(64), trailer_size: U16(66), fw_version: U32(68), period_unit_us: U16(72),
+    pretrigger_ms: U16(74), end_idle_s: U16(76), start_pct: U8(78), hall_pullup_v_x10: U8(79),
+    hall_timeout_us: U32(80), hall_min_edge_us: U16(84),
+  };
+  if (h.magic !== RACE_MAGIC) throw new FormatError(`Zły magic wyścigu 0x${h.magic.toString(16)}`);
+  if (h.format_version !== SUPPORTED_RACE_FORMAT) throw new FormatError(`Nieobsługiwana wersja formatu wyścigu ${h.format_version}`);
+  if (h.header_size !== HEADER_SIZE || h.sample_size !== RACE_SAMPLE_SIZE || h.trailer_size !== RACE_TRAILER_SIZE) {
+    throw new FormatError('Niezgodne rozmiary struktur wyścigu');
+  }
+  return h;
+}
+
+/**
+ * Dekoduje wyścig. Zwraca {header, n, end_reason, crc32, edges, period_rev, throttle_us,
+ * ax..gz, flags, n_ticks, t_s (koniec próbki względem próbki z gazem)}.
+ */
+export function parseRace(buf, { verifyCrc = true } = {}) {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const h = parseRaceHeader(u8);
+  if (u8.length < HEADER_SIZE + RACE_TRAILER_SIZE) throw new FormatError('Za krótki plik wyścigu');
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const to = u8.length - RACE_TRAILER_SIZE;
+  if (dv.getUint32(to, true) !== RACE_TRAILER_MAGIC) throw new FormatError('Brak trailera wyścigu');
+  const ns = dv.getUint32(to + 4, true);
+  const endReason = dv.getUint8(to + 8);
+  const crc = dv.getUint32(to + 12, true);
+  if (HEADER_SIZE + ns * RACE_SAMPLE_SIZE > to) throw new FormatError('Liczba próbek wyścigu poza plikiem');
+  if (verifyCrc && raceCrc(u8) !== crc) throw new FormatError('CRC wyścigu niezgodne');
+  const r = {
+    header: h, n: ns, end_reason: endReason, crc32: crc,
+    edges: new Uint16Array(ns), period_rev: new Uint16Array(ns), throttle_us: new Uint16Array(ns),
+    ax: new Int16Array(ns), ay: new Int16Array(ns), az: new Int16Array(ns),
+    gx: new Int16Array(ns), gy: new Int16Array(ns), gz: new Int16Array(ns),
+    flags: new Uint8Array(ns), n_ticks: new Uint8Array(ns), t_s: new Float64Array(ns),
+  };
+  let ticks = 0;
+  for (let i = 0; i < ns; i++) {
+    const o = HEADER_SIZE + i * RACE_SAMPLE_SIZE;
+    r.edges[i] = dv.getUint16(o, true);
+    r.period_rev[i] = dv.getUint16(o + 2, true);
+    r.throttle_us[i] = dv.getUint16(o + 4, true);
+    r.ax[i] = dv.getInt16(o + 6, true); r.ay[i] = dv.getInt16(o + 8, true); r.az[i] = dv.getInt16(o + 10, true);
+    r.gx[i] = dv.getInt16(o + 12, true); r.gy[i] = dv.getInt16(o + 14, true); r.gz[i] = dv.getInt16(o + 16, true);
+    r.flags[i] = dv.getUint8(o + 18);
+    r.n_ticks[i] = dv.getUint8(o + 19);
+    ticks += r.n_ticks[i];
+    r.t_s[i] = ticks / h.tick_rate_hz;
+  }
+  if (ns) {
+    const t0 = r.t_s[Math.min(h.trigger_index, ns - 1)];
+    for (let i = 0; i < ns; i++) r.t_s[i] -= t0;
+  }
+  return r;
+}
+
 export function fwVersionString(v) {
   return `${(v >>> 16) & 0xFF}.${(v >>> 8) & 0xFF}.${v & 0xFF}`;
 }

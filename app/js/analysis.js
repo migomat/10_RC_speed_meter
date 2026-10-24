@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS = {
   rest_gyro_std_dps: 1.5,
   rest_acc_std_g: 0.06,   // po filtrze lowpass_hz (drgania wentylatora ESC ~0,03–0,05 g)
   edge_min_us: 300,       // [µs] min. odstęp zboczy linii (drgnięcia wirnika przy ruszaniu)
+  race_lowpass_hz: 5,     // [Hz] filtr przyspieszeń w analizie wyścigu (próbki 50 Hz)
   estimator: { ...DEFAULT_EST_PARAMS },
 };
 
@@ -392,6 +393,129 @@ export function computeMetrics(sr, i0, vmin, tFirstEdge) {
     t_launch_s: t0,
   };
 }
+
+// ------------------------------------------------------------------ wyścig
+// Port 1:1 analyze_race() z analyze.py. Podział na okrążenia – osobny krok (później).
+const RSF_GAP = 0x40;
+
+export function analyzeRace(race, settings) {
+  const cfg = mergeSettings(settings);
+  const h = race.header;
+  const n = race.n;
+  const warnings = [];
+  if (n < 2) throw new Error('Za mało próbek wyścigu');
+  const fs = h.sample_rate_hz;
+  const t = race.t_s;
+  const ti = Math.min(h.trigger_index, n - 1);
+  const dt = new Float64Array(n);
+  for (let i = 0; i < n; i++) dt[i] = race.n_ticks[i] / h.tick_rate_hz;
+
+  const ka = h.accel_scale_g, kg = h.gyro_scale_dps;
+  const sc = (arr, k) => { const o = new Float64Array(arr.length); for (let i = 0; i < arr.length; i++) o[i] = arr[i] * k; return o; };
+  const [aFwd, aLeft] = mapAxes(sc(race.ax, ka), sc(race.ay, ka), sc(race.az, ka), cfg.imu_axes);
+  const [, , gUp] = mapAxes(sc(race.gx, kg), sc(race.gy, kg), sc(race.gz, kg), cfg.imu_axes);
+
+  // bias: próbki przed gazem bez zboczy (auto stało na starcie)
+  const rest = [];
+  for (let i = 0; i < ti; i++) if (race.edges[i] === 0) rest.push(i);
+  let aRefF = 0, aRefL = 0, gbUp = 0;
+  if (rest.length >= 10) {
+    for (const i of rest) aRefF += aFwd[i];
+    for (const i of rest) aRefL += aLeft[i];
+    for (const i of rest) gbUp += gUp[i];
+    aRefF /= rest.length; aRefL /= rest.length; gbUp /= rest.length;
+  } else {
+    warnings.push('brak postoju przed startem – bez korekty biasu IMU');
+  }
+
+  const neutral = h.throttle_neutral_us, full = h.throttle_full_us || 500;
+  const sign = h.throttle_fwd_higher ? 1 : -1;
+  const thrPct = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const w = race.throttle_us[i];
+    thrPct[i] = (w && neutral) ? (w - neutral) * 100 / full * sign : 0;
+  }
+
+  const epr = h.edges_per_rev;
+  const mPerRev = Math.PI * cfg.front_tire_diameter_mm * 1e-3 / cfg.final_drive_ratio;
+  const unit = h.period_unit_us;
+  const rpm = new Float64Array(n), vFront = new Float64Array(n), dFront = new Float64Array(n);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const p = race.period_rev[i];
+    rpm[i] = p > 0 ? 60e6 / (p * unit) : 0;
+    vFront[i] = rpm[i] / 60 * mPerRev;
+    acc += race.edges[i];
+    dFront[i] = acc / epr * mPerRev;
+  }
+
+  const fc = cfg.race_lowpass_hz;
+  const aLongRaw = new Float64Array(n), aLatRaw = new Float64Array(n);
+  for (let i = 0; i < n; i++) { aLongRaw[i] = G * (aFwd[i] - aRefF); aLatRaw[i] = G * (aLeft[i] - aRefL); }
+  const aLong = filtfiltButter2(aLongRaw, fc, fs);
+  const aLat = filtfiltButter2(aLatRaw, fc, fs);
+  const yawRate = new Float64Array(n), heading = new Float64Array(n);
+  let hd = 0;
+  for (let i = 0; i < n; i++) {
+    yawRate[i] = gUp[i] - gbUp;
+    if (i > 0) hd += yawRate[i] * dt[i];
+    heading[i] = hd;
+  }
+
+  // koniec jazdy: ostatnia próbka z ruchem albo gazem poza neutrum
+  let iLast = ti;
+  for (let i = n - 1; i >= ti; i--) {
+    if (race.edges[i] > 0 || Math.abs(thrPct[i]) >= 10) { iLast = i; break; }
+  }
+  let gaps = 0;
+  for (let i = 0; i < n; i++) if (race.flags[i] & RSF_GAP) gaps++;
+  if (gaps) warnings.push(`${gaps} przerw w zapisie (bufor RAM pełny)`);
+
+  const argMax = (f, from, to) => {
+    let best = -Infinity, bi = from;
+    for (let i = from; i <= to; i++) { const y = f(i); if (y > best) { best = y; bi = i; } }
+    return [best, bi];
+  };
+  const [vmax, iv] = argMax((i) => vFront[i], ti, iLast);
+  const [rmax, ir] = argMax((i) => rpm[i], ti, iLast);
+  const [alatMax] = argMax((i) => Math.abs(aLat[i]), ti, iLast);
+  const [alongMax] = argMax((i) => aLong[i], ti, iLast);
+  const [brakeMax] = argMax((i) => -aLong[i], ti, iLast);
+  let fullN = 0;
+  for (let i = ti; i <= iLast; i++) if (thrPct[i] > 90) fullN++;
+  const metrics = {
+    duration_s: t[iLast] - t[ti],
+    distance_m: dFront[iLast] - dFront[ti],
+    v_front_max: vmax,
+    v_front_max_t: t[iv],
+    v_front_avg: (dFront[iLast] - dFront[ti]) / Math.max(t[iLast] - t[ti], 1e-9),
+    rpm_max: rmax,
+    rpm_max_t: t[ir],
+    a_long_max_g: alongMax / G,
+    brake_max_g: brakeMax / G,
+    a_lat_max_g: alatMax / G,
+    full_throttle_frac: fullN / (iLast - ti + 1),
+    heading_total_deg: heading[iLast] - heading[ti],
+    gaps,
+  };
+  const series = { t, throttle_pct: thrPct, rpm, v_front: vFront, d_front: dFront,
+    a_long: aLong, a_lat: aLat, yaw_rate: yawRate, heading_deg: heading };
+  return { series, metrics, warnings, header: h, end_reason: race.end_reason, i_start: ti, i_last: iLast };
+}
+
+export const RACE_METRIC_LABELS = {
+  duration_s: ['czas jazdy', 'min:s'],
+  distance_m: ['droga (koła)', 'm'],
+  v_front_max: ['v kół maks.', 'm/s'],
+  v_front_avg: ['v kół śr.', 'm/s'],
+  rpm_max: ['maks. obroty silnika', 'rpm'],
+  a_long_max_g: ['maks. przyspieszenie', 'g'],
+  brake_max_g: ['maks. hamowanie', 'g'],
+  a_lat_max_g: ['maks. przeciążenie boczne', 'g'],
+  full_throttle_frac: ['pełny gaz', '%'],
+  heading_total_deg: ['suma skrętu', '°'],
+  gaps: ['przerwy w zapisie', ''],
+};
 
 export const METRIC_LABELS = {
   a_long_0_300ms: ['a śr. 0–0,3 s', 'm/s²'],

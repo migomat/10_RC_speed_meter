@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import struct
 import sys
+import zlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -148,6 +149,128 @@ def build_run(header: dict, samples: np.ndarray, edges_t_us=None, edges_line=Non
     return bytes(hdr) + body
 
 
+# ------------------------------------------------------------------ wyścig
+# Plik = RaceHeader (128 B) + n × RaceSample (20 B) + [wypełnienie] + RaceTrailer (16 B).
+# Trailer zawsze na końcu pliku; CRC32 (zlib) wszystkich bajtów przed polem crc32.
+RACE_MAGIC = 0x4C463458          # "X4FL"
+RACE_TRAILER_MAGIC = 0x45463458  # "X4FE"
+SUPPORTED_RACE_FORMAT = 1
+RACE_HEADER_SIZE = 128
+RACE_SAMPLE_SIZE = 20
+RACE_TRAILER_SIZE = 16
+RSF_GAP = 0x40
+RACE_END_NAMES = {0: "postój", 1: "pełna pamięć", 2: "zanik zasilania", 3: "komenda RSTOP"}
+
+_RHDR = struct.Struct("<IHHIIIIBBBBHHHHffHHIHHIIHHIHHHBBIH42s")
+assert _RHDR.size == RACE_HEADER_SIZE
+_RHDR_FIELDS = (
+    "magic format_version header_size seq unix_s boot_count uptime_ms hall_lines "
+    "motor_pole_pairs edges_per_rev throttle_fwd_higher sample_rate_hz imu_odr_hz "
+    "accel_range_g gyro_range_dps accel_scale_g gyro_scale_dps throttle_neutral_us "
+    "throttle_full_us trigger_index tick_rate_hz decim flags t0_us sample_size trailer_size "
+    "fw_version period_unit_us pretrigger_ms end_idle_s start_pct hall_pullup_v_x10 "
+    "hall_timeout_us hall_min_edge_us reserved"
+).split()
+_RTRL = struct.Struct("<IIB3sI")
+
+RACE_SAMPLE_DTYPE = np.dtype(
+    [
+        ("edges", "<u2"),
+        ("period_rev", "<u2"),
+        ("throttle_us", "<u2"),
+        ("ax", "<i2"),
+        ("ay", "<i2"),
+        ("az", "<i2"),
+        ("gx", "<i2"),
+        ("gy", "<i2"),
+        ("gz", "<i2"),
+        ("flags", "u1"),
+        ("n_ticks", "u1"),
+    ]
+)
+assert RACE_SAMPLE_DTYPE.itemsize == RACE_SAMPLE_SIZE
+
+
+@dataclass
+class Race:
+    header: dict
+    samples: np.ndarray            # RACE_SAMPLE_DTYPE
+    n_samples: int
+    end_reason: int
+    crc32: int
+    raw: bytes = field(repr=False, default=b"")
+
+    @property
+    def t_s(self) -> np.ndarray:
+        """Czas końca każdej próbki względem próbki z gazem (trigger_index) [s]."""
+        t = np.cumsum(self.samples["n_ticks"].astype(np.float64)) / float(self.header["tick_rate_hz"])
+        ti = min(int(self.header["trigger_index"]), max(len(t) - 1, 0))
+        return t - (t[ti] if len(t) else 0.0)
+
+
+def race_crc(data: bytes) -> int:
+    """CRC pliku wyścigu: zlib.crc32 bez ostatnich 4 B (pole crc32 trailera)."""
+    return zlib.crc32(data[:-4]) & 0xFFFFFFFF
+
+
+def file_kind(data: bytes) -> str:
+    """'run' (start), 'race' (wyścig) albo '' (nieznany)."""
+    if len(data) < 4:
+        return ""
+    m = struct.unpack_from("<I", data, 0)[0]
+    return "run" if m == RUN_MAGIC else "race" if m == RACE_MAGIC else ""
+
+
+def parse_race_header(data: bytes) -> dict:
+    if len(data) < RACE_HEADER_SIZE:
+        raise FormatError("Za krótki nagłówek wyścigu")
+    h = dict(zip(_RHDR_FIELDS, _RHDR.unpack_from(data, 0)))
+    del h["reserved"]
+    if h["magic"] != RACE_MAGIC:
+        raise FormatError(f"Zły magic wyścigu 0x{h['magic']:08X}")
+    if h["format_version"] != SUPPORTED_RACE_FORMAT:
+        raise FormatError(f"Nieobsługiwana wersja formatu wyścigu {h['format_version']}")
+    if (h["header_size"] != RACE_HEADER_SIZE or h["sample_size"] != RACE_SAMPLE_SIZE
+            or h["trailer_size"] != RACE_TRAILER_SIZE):
+        raise FormatError("Niezgodne rozmiary struktur wyścigu")
+    return h
+
+
+def parse_race(data: bytes, verify_crc: bool = True) -> Race:
+    h = parse_race_header(data)
+    if len(data) < RACE_HEADER_SIZE + RACE_TRAILER_SIZE:
+        raise FormatError("Za krótki plik wyścigu")
+    magic, n, end, _, crc = _RTRL.unpack_from(data, len(data) - RACE_TRAILER_SIZE)
+    if magic != RACE_TRAILER_MAGIC:
+        raise FormatError("Brak trailera wyścigu")
+    if RACE_HEADER_SIZE + n * RACE_SAMPLE_SIZE > len(data) - RACE_TRAILER_SIZE:
+        raise FormatError("Liczba próbek wyścigu poza plikiem")
+    if verify_crc and race_crc(data) != crc:
+        raise FormatError("CRC wyścigu niezgodne")
+    samples = np.frombuffer(data, RACE_SAMPLE_DTYPE, n, RACE_HEADER_SIZE).copy()
+    return Race(header=h, samples=samples, n_samples=n, end_reason=end, crc32=crc, raw=bytes(data))
+
+
+def build_race(header: dict, samples: np.ndarray, end_reason: int = 0, padding: int = 0) -> bytes:
+    """Składa plik wyścigu (testy, wektory testowe, demo). Liczy CRC."""
+    h = dict(header)
+    h.update(magic=RACE_MAGIC, format_version=SUPPORTED_RACE_FORMAT, header_size=RACE_HEADER_SIZE,
+             sample_size=RACE_SAMPLE_SIZE, trailer_size=RACE_TRAILER_SIZE)
+    vals = [h.get(k, 0) if k != "reserved" else b"\0" * 42 for k in _RHDR_FIELDS]
+    body = _RHDR.pack(*vals) + np.asarray(samples, dtype=RACE_SAMPLE_DTYPE).tobytes() + b"\xff" * padding
+    tr = struct.pack("<IIB3s", RACE_TRAILER_MAGIC, len(samples), end_reason, b"\0\0\0")
+    crc = zlib.crc32(body + tr) & 0xFFFFFFFF
+    return body + tr + struct.pack("<I", crc)
+
+
+def parse_any(data: bytes, verify_crc: bool = True):
+    """Run albo Race wg magic."""
+    k = file_kind(data)
+    if k == "race":
+        return parse_race(data, verify_crc)
+    return parse_run(data, verify_crc)
+
+
 def main(argv=None):
     import argparse
 
@@ -155,7 +278,15 @@ def main(argv=None):
     ap.add_argument("files", nargs="+")
     a = ap.parse_args(argv)
     for f in a.files:
-        r = parse_run(open(f, "rb").read())
+        data = open(f, "rb").read()
+        if file_kind(data) == "race":
+            r = parse_race(data)
+            h = r.header
+            print(f"{f}: wyścig seq={h['seq']} boot={h['boot_count']} unix={h['unix_s']} "
+                  f"{h['sample_rate_hz']} Hz samples={r.n_samples} "
+                  f"({r.t_s[-1] if r.n_samples else 0:.0f} s) koniec: {RACE_END_NAMES.get(r.end_reason, r.end_reason)}")
+            continue
+        r = parse_run(data)
         h = r.header
         print(f"{f}: seq={h['seq']} boot={h['boot_count']} unix={h['unix_s']} "
               f"hall_lines={h['hall_lines']} samples={h['n_samples']} edges={h['n_edges']} "

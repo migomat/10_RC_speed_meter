@@ -3,12 +3,12 @@
 
 import { WebBluetoothTransport, DemoTransport, bleErrorMessage } from './transport.js';
 import { Device, BusyError } from './protocol.js';
-import { parseRun, parseHeader, toBase64, fromBase64, RF, fwVersionString } from './format.js';
-import { analyze, mergeSettings, DEFAULT_SETTINGS, METRIC_LABELS, interpAt } from './analysis.js';
+import { parseRun, parseHeader, parseRace, toBase64, fromBase64, RF, fwVersionString, RACE_END_NAMES } from './format.js';
+import { analyze, analyzeRace, mergeSettings, DEFAULT_SETTINGS, METRIC_LABELS, RACE_METRIC_LABELS, interpAt } from './analysis.js';
 import * as db from './storage.js';
 import { syncedCharts, scatterChart, PALETTE } from './charts.js';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '–' : v.toFixed(d).replace('.', ','));
 
@@ -19,7 +19,10 @@ const state = {
   settings: mergeSettings(null),
   analysisCache: new Map(),
   partial: new Map(),          // seq → częściowo pobrane dane (wznawianie)
-  lastBatch: [],               // id startów z ostatniego pobrania (tag serii)
+  lastBatch: [],               // {kind: 'run'|'race', id} z ostatniego pobrania (tag serii)
+  raceInfo: null,              // RLIST (protokół ≥ 2)
+  currentRace: null,
+  raceCharts: null,
   lastStatus: null,
   live: { on: false, last: 0, data: null },
   speedUnit: 'kmh',
@@ -83,9 +86,10 @@ function goto(view) {
   currentView = view;
   document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${view}`));
   document.querySelectorAll('nav.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.view === view ||
-    (view === 'run' && b.dataset.view === 'runs')));
+    (view === 'run' && b.dataset.view === 'runs') || (view === 'race' && b.dataset.view === 'races')));
   window.scrollTo(0, 0);
   if (view === 'runs') renderRunsList();
+  if (view === 'races') renderRacesList();
   if (view === 'compare') renderCompare();
   if (view === 'speed') enterSpeed();
   if (view === 'settings') renderSettings();
@@ -135,6 +139,8 @@ function onDisconnected() {
   $('btnDownload').disabled = true;
   $('connInfo').textContent = 'Rozłączono.';
   show($('devStatus'), false);
+  state.raceInfo = null;
+  renderRaceDev(null);
   state.live.on = false;
   $('liveToggle').checked = false;
   if (state.downloading) $('dlText').textContent = 'Połączenie zerwane – pobieranie zostanie wznowione po ponownym połączeniu.';
@@ -147,6 +153,9 @@ async function refreshDevice() {
   if (!d) return;
   const [info, st, runs] = [await d.info(), await d.status(), await d.list()];
   state.lastStatus = st;
+  state.raceInfo = (info.proto || 1) >= 2 ? await d.rlist() : null;
+  renderRaceDev(state.raceInfo);
+  const racesNew = state.raceInfo ? state.raceInfo.races.filter((r) => !r.read).length : 0;
   const box = $('devStatus');
   box.innerHTML = '';
   const rows = [
@@ -158,14 +167,65 @@ async function refreshDevice() {
   ];
   for (const [k, v] of rows) box.insertAdjacentHTML('beforeend', `<span class="muted">${k}</span><b>${v}</b>`);
   show(box, true);
-  $('dlInfo').textContent = runs.length ? `Do pobrania: ${runs.length} ${plural(runs.length, 'start', 'starty', 'startów')}.` : 'Brak nowych startów na urządzeniu.';
-  $('btnDownload').disabled = !runs.length;
+  const parts = [];
+  if (runs.length) parts.push(`${runs.length} ${plural(runs.length, 'start', 'starty', 'startów')}`);
+  if (racesNew) parts.push(`${racesNew} ${plural(racesNew, 'wyścig', 'wyścigi', 'wyścigów')}`);
+  $('dlInfo').textContent = parts.length ? `Do pobrania: ${parts.join(' i ')}.` : 'Brak nowych danych na urządzeniu.';
+  $('btnDownload').disabled = !runs.length && !racesNew;
   const warn = $('dlWarn');
   if (st.overwritten_unread > 0) {
     warn.textContent = `Uwaga: ${st.overwritten_unread} ${plural(st.overwritten_unread, 'start został nadpisany', 'starty zostały nadpisane', 'startów zostało nadpisanych')} przed pobraniem (brak miejsca w pamięci Xiao).`;
     show(warn, true);
   } else show(warn, false);
   return runs;
+}
+
+// Karta „Pamięć wyścigów”: zajętość, stan, przycisk kasowania (tylko po pobraniu wszystkich)
+const RACE_STATE_NAMES = { IDLE: 'gotowa – wyścig zacznie się sam przy gazie', RECORDING: 'nagrywanie wyścigu',
+  FINISHING: 'zapis końcówki wyścigu', FULL: 'PEŁNA – nagrywanie wstrzymane', ERASING: 'kasowanie…',
+  DIRTY: 'zawiera stare dane – wymaga przygotowania', ERROR: 'błąd zapisu' };
+
+function renderRaceDev(rl) {
+  const btn = $('btnRaceErase'), hint = $('raceEraseHint'), bar = $('raceBar');
+  if (!rl) {
+    $('raceDevInfo').textContent = state.device ? 'Firmware bez obsługi wyścigów (protokół 1).' : 'Połącz się, aby zobaczyć stan.';
+    show(btn, false); show(bar, false); hint.textContent = '';
+    return;
+  }
+  const unread = rl.races.filter((r) => !r.read).length;
+  const pct = rl.size ? Math.min(100, (rl.used / rl.size) * 100) : 0;
+  $('raceDevInfo').textContent = `${RACE_STATE_NAMES[rl.state] || rl.state} · ${rl.races.length} ${plural(rl.races.length, 'wyścig', 'wyścigi', 'wyścigów')}` +
+    (unread ? ` (${unread} niepobranych)` : '') + ` · zajęte ${Math.round(rl.used / 1024)} / ${Math.round(rl.size / 1024)} kB`;
+  show(bar, true);
+  bar.firstElementChild.style.width = `${pct}%`;
+  btn.classList.remove('armed');
+  if (rl.state === 'DIRTY') {
+    btn.textContent = 'Przygotuj pamięć wyścigów';
+    btn.dataset.force = '1';
+    btn.disabled = false;
+    hint.textContent = 'W tej części pamięci są stare dane (np. starty sprzed zmiany układu pamięci). Kasowanie je usunie.';
+  } else {
+    btn.textContent = 'Skasuj pamięć wyścigów';
+    btn.dataset.force = '';
+    btn.disabled = unread > 0 || !rl.races.length || rl.state === 'RECORDING' || rl.state === 'FINISHING' || rl.state === 'ERASING';
+    hint.textContent = unread ? 'Najpierw pobierz wszystkie wyścigi – kasowanie jest możliwe dopiero po zapisaniu ich w telefonie.'
+      : rl.races.length ? 'Wszystkie wyścigi są zapisane w telefonie.' : '';
+  }
+  btn.dataset.orig = btn.textContent;
+  show(btn, rl.state === 'DIRTY' || rl.races.length > 0);
+}
+
+async function eraseRaces() {
+  const d = state.device;
+  if (!d) return;
+  const force = $('btnRaceErase').dataset.force === '1';
+  try {
+    await d.rerase(force);
+    toast('Kasowanie pamięci wyścigów…');
+    setTimeout(() => { if (state.device && !state.downloading) refreshDevice().catch(() => {}); }, 1500);
+  } catch (e) {
+    toast(e instanceof BusyError ? 'Trwa nagrywanie wyścigu – spróbuj później.' : e.message, 4000);
+  }
 }
 
 function plural(n, one, few, many) {
@@ -228,15 +288,61 @@ async function downloadAll() {
       };
       await db.putRun(rec);                 // czeka na transaction.oncomplete
       await d.del(r.seq);                   // dopiero teraz kasowanie z Xiao
-      batch.push(id);
+      batch.push({ kind: 'run', id });
       doneBytes += r.len;
       bar.firstElementChild.style.width = `${(doneBytes / total) * 100}%`;
     }
-    $('dlText').textContent = batch.length ? `Pobrano ${batch.length} ${plural(batch.length, 'start', 'starty', 'startów')}.` : 'Nic nowego do pobrania.';
+    // Wyścigi: po zapisie w IndexedDB tylko RDEL (oznaczenie „pobrany”);
+    // kasowanie całej pamięci wyścigów osobnym przyciskiem.
+    const info = await d.info();
+    let nRaces = 0;
+    if ((info.proto || 1) >= 2) {
+      const races = (await d.rlist()).races.filter((r) => !r.read);
+      const rTotal = races.reduce((a, r) => a + r.len, 0);
+      let rDone = 0;
+      for (let k = 0; k < races.length; k++) {
+        const r = races[k];
+        const id = db.raceId({ seq: r.seq, crc: r.crc, boot: r.boot });
+        if (await db.hasRace(id)) { await d.rdel(r.seq); rDone += r.len; continue; }
+        const label = `Wyścig ${k + 1}/${races.length} (seq ${r.seq})`;
+        let data;
+        try {
+          data = await d.download(r, {
+            race: true,
+            partial: state.partial.get(id) || null,
+            onProgress: (got) => {
+              bar.firstElementChild.style.width = `${((rDone + got) / rTotal) * 100}%`;
+              $('dlText').textContent = `${label}: ${Math.round(got / 1024)} / ${Math.round(r.len / 1024)} kB`;
+            },
+          });
+        } catch (e) {
+          if (e.partial && e.partial.length) state.partial.set(id, e.partial);
+          throw e;
+        }
+        state.partial.delete(id);
+        const race = parseRace(data);          // weryfikuje CRC i format
+        const h = race.header;
+        await db.putRace({
+          id, raw: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+          seq: r.seq, crc: r.crc, boot: r.boot, uptime_ms: r.uptime_ms, unix: h.unix_s,
+          approx_unix: approxUnix(h, st), downloaded_at: Date.now(), tag: '', note: '',
+          device: state.transport.name, flags: h.flags, end_reason: race.end_reason,
+        });
+        await d.rdel(r.seq);
+        batch.push({ kind: 'race', id });
+        nRaces++;
+        rDone += r.len;
+      }
+    }
+    const nRuns = batch.length - nRaces;
+    const got = [];
+    if (nRuns) got.push(`${nRuns} ${plural(nRuns, 'start', 'starty', 'startów')}`);
+    if (nRaces) got.push(`${nRaces} ${plural(nRaces, 'wyścig', 'wyścigi', 'wyścigów')}`);
+    $('dlText').textContent = got.length ? `Pobrano ${got.join(' i ')}.` : 'Nic nowego do pobrania.';
   } catch (e) {
     failed = e;
     const msg = e instanceof BusyError ? 'Urządzenie nagrywa/zapisuje – spróbuj za chwilę.' : e.message;
-    $('dlText').textContent = `Przerwano: ${msg}. Starty nie zostały skasowane z Xiao.`;
+    $('dlText').textContent = `Przerwano: ${msg}. Niepobrane dane zostały na Xiao.`;
   } finally {
     state.downloading = false;
     await wakeLock(false);
@@ -274,10 +380,10 @@ async function showTagBatch() {
 
 async function applyBatchTag(tag) {
   tag = tag.trim();
-  for (const id of state.lastBatch) await db.updateRun(id, { tag });
+  for (const b of state.lastBatch) await (b.kind === 'race' ? db.updateRace(b.id, { tag }) : db.updateRun(b.id, { tag }));
   await db.pushRecentTag(tag);
   show($('tagBatch'), false);
-  toast(tag ? `Tag „${tag}” przypisany do ${state.lastBatch.length} startów` : 'Pominięto tag');
+  toast(tag ? `Tag „${tag}” przypisany do ${state.lastBatch.length} nagrań` : 'Pominięto tag');
 }
 
 // ------------------------------------------------------------------ LIVE / prędkościomierz
@@ -287,10 +393,16 @@ function onLive(m) {
   const box = $('liveBox');
   if (state.live.on && currentView === 'connect') {
     box.innerHTML = [['v', `${fmt(m.v)} m/s`], ['v kół', `${fmt(m.v_front)} m/s`], ['obroty', `${m.rpm} rpm`],
-      ['gaz', `${m.thr} µs (${fmt(m.thr_pct, 0)} %)`], ['a', `${fmt(m.ax)} g`], ['stan', m.state]]
+      ['gaz', `${m.thr} µs (${fmt(m.thr_pct, 0)} %)`], ['a', `${fmt(m.ax)} g`], ['stan', m.state],
+      ['wyścig', m.race ? (m.race === 'RECORDING' ? `nagrywanie ${mmss(m.race_s)}` : m.race) : '–']]
       .map(([k, v]) => `<span class="muted">${k}</span><b>${v}</b>`).join('');
   }
   if (currentView === 'speed') renderSpeed(m);
+}
+
+function mmss(s) {
+  s = Math.max(0, Math.round(s || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function speedConv(v) { return state.speedUnit === 'kmh' ? v * 3.6 : v; }
@@ -304,6 +416,7 @@ function renderSpeed(m) {
   $('spdRpmMax').textContent = Math.round(state.rpmMax);
   $('spdThr').textContent = `${fmt(m.thr_pct, 0)} %`;
   $('spdState').textContent = m.state === 'RECORDING' ? '● nagrywanie' : '';
+  $('spdRace').textContent = m.race === 'RECORDING' ? `⚑ wyścig ${mmss(m.race_s)}` : m.race === 'FULL' ? '⚑ pamięć wyścigów pełna' : '';
   const s = $('spdSlip');
   s.className = `slip ${m.slip ? 'bad' : 'ok'}`;
   s.textContent = m.slip ? 'BUKSOWANIE' : 'przyczepność';
@@ -489,6 +602,115 @@ async function shareOrDownload(name, text, mime) {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 }
 
+// ------------------------------------------------------------------ wyścigi
+function getRaceAnalysis(rec) {
+  const key = settingsKey();
+  const c = state.analysisCache.get('race:' + rec.id);
+  if (c && c.key === key) return c.res;
+  const race = parseRace(new Uint8Array(rec.raw), { verifyCrc: false });
+  const res = analyzeRace(race, state.settings);
+  state.analysisCache.set('race:' + rec.id, { key, res });
+  return res;
+}
+
+function raceMetricValue(k, v) {
+  if (v == null || Number.isNaN(v)) return '–';
+  if (k === 'duration_s') return mmss(v);
+  if (k === 'rpm_max' || k === 'heading_total_deg' || k === 'gaps' || k === 'distance_m') return fmt(v, 0);
+  if (k === 'full_throttle_frac') return fmt(v * 100, 0);
+  return fmt(v, 2);
+}
+
+async function renderRacesList() {
+  const all = (await db.allRaces()).sort((a, b) => (b.unix || b.approx_unix || b.downloaded_at / 1000) - (a.unix || a.approx_unix || a.downloaded_at / 1000));
+  $('racesCount').textContent = `${all.length} ${plural(all.length, 'wyścig', 'wyścigi', 'wyścigów')}`;
+  const list = $('racesList');
+  list.innerHTML = '';
+  if (!all.length) {
+    list.innerHTML = '<p class="muted center">Brak wyścigów. Xiao nagrywa je samo przy jeździe; pobierzesz je przyciskiem „Pobierz wszystko”.</p>';
+    return;
+  }
+  for (const rec of all) {
+    let m = {};
+    try { m = getRaceAnalysis(rec).metrics; } catch (e) { m = {}; }
+    const b = document.createElement('button');
+    b.className = 'item';
+    b.innerHTML = `<div class="top"><b>${runDate(rec)}</b>${rec.tag ? `<span class="tag">${esc(rec.tag)}</span>` : ''}</div>
+      ${rec.note ? `<div class="muted small">${esc(rec.note)}</div>` : ''}
+      <div class="m"><span>czas <b>${raceMetricValue('duration_s', m.duration_s)}</b></span>
+      <span>droga <b>${raceMetricValue('distance_m', m.distance_m)}</b> m</span>
+      <span>v maks. <b>${fmt(speedConv(m.v_front_max), 1)}</b> ${state.speedUnit === 'kmh' ? 'km/h' : 'm/s'}</span>
+      <span>obroty <b>${raceMetricValue('rpm_max', m.rpm_max)}</b> rpm</span>
+      <span class="muted">seq ${rec.seq}</span></div>`;
+    b.onclick = () => openRace(rec.id);
+    list.appendChild(b);
+  }
+}
+
+async function openRace(id) {
+  const rec = await db.getRace(id);
+  if (!rec) return;
+  state.currentRace = rec;
+  goto('race');
+  const res = getRaceAnalysis(rec);
+  const h = res.header;
+  $('raceTitle').textContent = `Wyścig seq ${rec.seq}${rec.tag ? ' – ' + rec.tag : ''}`;
+  $('raceMeta').textContent = `${runDate(rec)} · ${h.sample_rate_hz} Hz · ${res.series.t.length} próbek · koniec: ${RACE_END_NAMES[res.end_reason] || res.end_reason} · fw ${fwVersionString(h.fw_version)}` +
+    (h.flags & RF.SIMULATED ? ' · dane syntetyczne' : '');
+  const warns = [...res.warnings];
+  if (h.flags & RF.IMU_ERROR) warns.push('Błąd IMU podczas nagrania.');
+  $('raceWarn').textContent = warns.join(' ');
+  show($('raceWarn'), warns.length > 0);
+  $('raceTag').value = rec.tag || '';
+  $('raceNote').value = rec.note || '';
+  if (state.raceCharts) state.raceCharts.destroy();
+  const s = res.series;
+  const v = Float64Array.from(s.v_front, (x) => speedConv(x));
+  state.raceCharts = syncedCharts($('raceCharts'), s.t, [
+    { label: 'gaz', unit: '%', height: 100, series: [{ label: 'gaz', values: s.throttle_pct, color: PALETTE[4] }] },
+    { label: 'v kół', unit: state.speedUnit === 'kmh' ? 'km/h' : 'm/s', height: 170, series: [{ label: 'v_front', values: v, color: PALETTE[1], width: 2 }] },
+    { label: 'obroty', unit: 'rpm', height: 130, series: [{ label: 'obroty silnika', values: s.rpm, color: PALETTE[5] }] },
+    { label: 'a', unit: 'm/s²', height: 160, series: [
+      { label: 'a_long', values: s.a_long, color: PALETTE[0], width: 2 },
+      { label: 'a_lat', values: s.a_lat, color: PALETTE[2] }] },
+    { label: 'skręt', unit: '°/s', height: 130, series: [{ label: 'prędkość skrętu', values: s.yaw_rate, color: PALETTE[3] }] },
+  ], { syncKey: 'race' });
+  setRaceRange('all');
+  $('raceMetrics').innerHTML = Object.entries(RACE_METRIC_LABELS).map(([k, [label, unit]]) => {
+    let val = raceMetricValue(k, res.metrics[k]), u = unit;
+    if (k === 'v_front_max' || k === 'v_front_avg') { val = fmt(speedConv(res.metrics[k]), 1); u = state.speedUnit === 'kmh' ? 'km/h' : 'm/s'; }
+    return `<div class="metric"><div class="l">${label}</div><div class="v">${val} <span class="small muted">${u}</span></div></div>`;
+  }).join('');
+}
+
+function setRaceRange(r) {
+  const rec = state.currentRace;
+  if (!rec || !state.raceCharts) return;
+  const t = getRaceAnalysis(rec).series.t;
+  const t0 = Math.max(t[0], -1);
+  if (r === 'all') state.raceCharts.setRange(t[0], t[t.length - 1]);
+  else state.raceCharts.setRange(t0, t0 + Number(r));
+}
+
+async function saveRaceTag() {
+  const rec = state.currentRace;
+  if (!rec) return;
+  const tag = $('raceTag').value.trim();
+  await db.updateRace(rec.id, { tag, note: $('raceNote').value });
+  rec.tag = tag;
+  await db.pushRecentTag(tag);
+  $('raceTitle').textContent = `Wyścig seq ${rec.seq}${tag ? ' – ' + tag : ''}`;
+  toast('Zapisano');
+}
+
+function raceCsv(rec) {
+  const s = getRaceAnalysis(rec).series;
+  const cols = ['t', 'throttle_pct', 'v_front', 'rpm', 'd_front', 'a_long', 'a_lat', 'yaw_rate', 'heading_deg'];
+  const lines = [cols.join(';')];
+  for (let i = 0; i < s.t.length; i++) lines.push(cols.map((c) => Number(s[c][i]).toFixed(4)).join(';'));
+  return lines.join('\n');
+}
+
 // ------------------------------------------------------------------ porównanie
 const cmpSel = { tags: new Set(), runs: new Set() };
 
@@ -572,6 +794,7 @@ function renderSettings() {
   }
   $('setLp').value = s.lowpass_hz;
   $('setVmin').value = s.v_min_mps;
+  $('setRaceLp').value = s.race_lowpass_hz;
   $('setEst').innerHTML = EST_FIELDS.map(([k, l]) => `<label>${l}<input data-est="${k}" type="number" step="any" inputmode="decimal" value="${s.estimator[k]}"></label>`).join('');
   $('setTheme').value = localStorage.getItem('x4f_theme') || 'auto';
   $('appVersion').textContent = `X4F Launch Logger ${APP_VERSION} · analiza zgodna z tools/rc_launch/analyze.py`;
@@ -585,10 +808,11 @@ async function saveSettings() {
   s.imu_axes = { forward: $('setAxF').value, left: $('setAxL').value, up: $('setAxU').value };
   s.lowpass_hz = num('setLp');
   s.v_min_mps = num('setVmin');
+  s.race_lowpass_hz = num('setRaceLp');
   document.querySelectorAll('[data-est]').forEach((el) => { s.estimator[el.dataset.est] = parseFloat(el.value); });
   const axesUsed = new Set(Object.values(s.imu_axes).map((a) => a[1]));
   if (axesUsed.size !== 3) { $('setMsg').textContent = 'Każda oś auta musi mieć inną oś płytki.'; return; }
-  if (!(s.final_drive_ratio > 0 && s.front_tire_diameter_mm > 0 && s.lowpass_hz > 0)) { $('setMsg').textContent = 'Niepoprawne wartości.'; return; }
+  if (!(s.final_drive_ratio > 0 && s.front_tire_diameter_mm > 0 && s.lowpass_hz > 0 && s.race_lowpass_hz > 0)) { $('setMsg').textContent = 'Niepoprawne wartości.'; return; }
   state.settings = s;
   state.analysisCache.clear();
   await db.kvSet('settings', s);
@@ -603,14 +827,16 @@ function applyTheme(t) {
 // ------------------------------------------------------------------ eksport / import bazy
 async function exportDb() {
   const runs = await db.allRuns();
+  const races = await db.allRaces();
   const out = {
     app: 'x4f-launch-logger', version: 1, exported_at: new Date().toISOString(), settings: state.settings,
     recent_tags: await db.recentTags(),
     runs: runs.map((r) => ({ ...r, raw: undefined, raw_b64: toBase64(new Uint8Array(r.raw)) })),
+    races: races.map((r) => ({ ...r, raw: undefined, raw_b64: toBase64(new Uint8Array(r.raw)) })),
   };
   const name = `x4f_baza_${new Date().toISOString().slice(0, 10)}.json`;
   await shareOrDownload(name, JSON.stringify(out), 'application/json');
-  $('dbMsg').textContent = `Wyeksportowano ${runs.length} startów.`;
+  $('dbMsg').textContent = `Wyeksportowano ${runs.length} startów i ${races.length} wyścigów.`;
 }
 
 async function importDb(file) {
@@ -628,9 +854,20 @@ async function importDb(file) {
         n++;
       } catch (e) { bad++; }
     }
+    let nr = 0;
+    for (const r of obj.races || []) {
+      try {
+        const raw = fromBase64(r.raw_b64);
+        parseRace(raw);   // weryfikacja CRC
+        const rec = { ...r, raw: raw.buffer };
+        delete rec.raw_b64;
+        await db.putRace(rec);
+        nr++;
+      } catch (e) { bad++; }
+    }
     if (obj.settings) { state.settings = mergeSettings(obj.settings); await db.kvSet('settings', state.settings); state.analysisCache.clear(); }
     for (const t of (obj.recent_tags || []).reverse()) await db.pushRecentTag(t);
-    $('dbMsg').textContent = `Zaimportowano ${n} startów${bad ? `, odrzucono ${bad} uszkodzonych` : ''}.`;
+    $('dbMsg').textContent = `Zaimportowano ${n} startów i ${nr} wyścigów${bad ? `, odrzucono ${bad} uszkodzonych` : ''}.`;
     renderSettings();
   } catch (e) {
     $('dbMsg').textContent = `Błąd importu: ${e.message}`;
@@ -691,6 +928,24 @@ async function init() {
     state.analysisCache.delete(r.id);
     toast('Usunięto start');
     goto('runs');
+  });
+
+  armedButton($('btnRaceErase'), 'Na pewno skasować?', eraseRaces);
+  $('raceBack').onclick = () => goto('races');
+  document.querySelectorAll('[data-rrange]').forEach((b) => { b.onclick = () => setRaceRange(b.dataset.rrange); });
+  $('raceTagSave').onclick = () => saveRaceTag();
+  $('raceNote').onchange = () => saveRaceTag();
+  $('raceExportCsv').onclick = () => {
+    const r = state.currentRace;
+    if (r) shareOrDownload(`x4f_wyscig_seq${r.seq}${r.tag ? '_' + r.tag.replace(/\W+/g, '_') : ''}.csv`, raceCsv(r), 'text/csv');
+  };
+  armedButton($('raceDelete'), 'Na pewno usunąć?', async () => {
+    const r = state.currentRace;
+    if (!r) return;
+    await db.deleteRace(r.id);
+    state.analysisCache.delete('race:' + r.id);
+    toast('Usunięto wyścig');
+    goto('races');
   });
 
   $('setSave').onclick = () => saveSettings();

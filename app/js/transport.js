@@ -3,7 +3,7 @@
 // Tylko ten plik odwołuje się do navigator.bluetooth. Plan awaryjny:
 // CapacitorBleTransport (@capacitor-community/bluetooth-le) z tym samym interfejsem.
 
-import { crc32, runCrc, parseHeader } from './format.js';
+import { crc32, runCrc, parseHeader, raceCrc, parseRace } from './format.js';
 
 export const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
 export const NUS_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
@@ -126,6 +126,8 @@ export class DemoTransport {
     this.t0 = performance.now();
     this.overwritten = 0;
     this.mtuPayload = 243;
+    this.races = [];        // {seq, data, crc, unix, boot, uptime_ms, n, end, read}
+    this.raceState = 'IDLE';
   }
 
   onFrame(cb) { this.frameCb = cb; }
@@ -139,7 +141,34 @@ export class DemoTransport {
       const raw = new Uint8Array(await (await fetch(this.baseUrl + name + '.bin')).arrayBuffer());
       this.runs.push(this._wrap(raw, k++));
     }
+    await this._loadRaces();
   }
+
+  async _loadRaces() {
+    let idx = [];
+    try { idx = await (await fetch(this.baseUrl + 'races.json')).json(); } catch (e) { return; }
+    for (const name of idx) {
+      const raw = new Uint8Array(await (await fetch(this.baseUrl + name + '.bin')).arrayBuffer());
+      this.races.push(this._wrapRace(raw, this.races.length));
+    }
+  }
+
+  // Wyścig z nowym seq i przeliczonym CRC (trailer na końcu pliku).
+  _wrapRace(raw, k) {
+    const data = raw.slice();
+    const dv = new DataView(data.buffer);
+    const seq = this.nextSeq++;
+    dv.setUint32(8, seq, true);
+    dv.setUint32(12, 0, true);
+    dv.setUint32(16, 7, true);
+    dv.setUint32(20, 30000 + k * 40000, true);
+    const crc = raceCrc(data);
+    dv.setUint32(data.length - 4, crc, true);
+    const r = parseRace(data);
+    return { seq, data, crc, unix: 0, boot: 7, uptime_ms: r.header.uptime_ms, n: r.n, end: r.end_reason, read: false };
+  }
+
+  _raceUsed() { return this.races.reduce((a, r) => a + Math.ceil((r.data.length + 32) / 256) * 256, 0); }
 
   // Nadaje kolejny seq (jak nowe starty z urządzenia), zachowując poprawne CRC.
   _wrap(raw, k) {
@@ -183,6 +212,7 @@ export class DemoTransport {
       const raw = new Uint8Array(await (await fetch(this.baseUrl + name + '.bin')).arrayBuffer());
       this.runs.push(this._wrap(raw, this.runs.length));
     }
+    await this._loadRaces();
   }
 
   async _emit(type, bytes) {
@@ -207,21 +237,45 @@ export class DemoTransport {
     const [cmd, ...args] = text.trim().split(/\s+/);
     switch (cmd) {
       case 'INFO':
-        return this._text(JSON.stringify({ fw: '1.0.0-demo', format: 1, proto: 1, hall_lines: 1, pole_pairs: 1,
-          edges_per_rev: 2, slot_size: 131072, slots: 16, sample_rate: 500, get_block_max: 4096, name: this.name }));
+        return this._text(JSON.stringify({ fw: '1.1.0-demo', format: 1, proto: 2, hall_lines: 1, pole_pairs: 1,
+          edges_per_rev: 2, slot_size: 131072, slots: 8, sample_rate: 500, get_block_max: 4096, name: this.name,
+          race_rate: 50, race_area: 1048576, race_sample_size: 20 }));
       case 'STATUS':
         return this._text(JSON.stringify({ state: 'IDLE', neutral_us: 1500, neutral_learned: true, throttle_ok: true,
-          runs: this.runs.length, free_slots: 16 - this.runs.length, overwritten_unread: this.overwritten,
-          time_set: this.timeSet, uptime_ms: this.uptime(), boot: 7, connected: true }));
+          runs: this.runs.length, free_slots: Math.max(0, 8 - this.runs.length), overwritten_unread: this.overwritten,
+          time_set: this.timeSet, uptime_ms: this.uptime(), boot: 7, connected: true,
+          race_state: this.raceState, races: this.races.length, races_unread: this.races.filter((r) => !r.read).length,
+          race_used: this._raceUsed(), race_size: 1048576, race_rec_s: 0 }));
       case 'TIME':
         this.timeSet = true;
         return this._text('OK');
       case 'LIST':
         return this._text(JSON.stringify({ runs: this.runs.map((r) => ({ seq: r.seq, len: r.data.length, crc: r.crc,
           unix: r.unix, boot: r.boot, uptime_ms: r.uptime_ms })) }));
-      case 'GET': {
+      case 'RLIST':
+        return this._text(JSON.stringify({ races: this.races.map((r) => ({ seq: r.seq, len: r.data.length, crc: r.crc,
+          unix: r.unix, boot: r.boot, uptime_ms: r.uptime_ms, n: r.n, end: r.end, read: r.read })),
+        state: this.raceState, used: this._raceUsed(), size: 1048576 }));
+      case 'RDEL': {
+        const seq = Number(args[0]);
+        const r = this.races.find((x) => x.seq === seq);
+        if (!r) return this._text(`{"err":"NOT_FOUND","seq":${seq}}`);
+        r.read = true;
+        return this._text(`OK RDEL ${seq}`);
+      }
+      case 'RERASE': {
+        const unread = this.races.filter((r) => !r.read).length;
+        if (unread && args[0] !== 'FORCE') return this._text(`{"err":"UNREAD","unread":${unread},"state":"${this.raceState}"}`);
+        this.races = [];
+        this.raceState = 'ERASING';
+        setTimeout(() => { this.raceState = 'IDLE'; }, 600);
+        return this._text('OK');
+      }
+      case 'RSTOP': return this._text('OK');
+      case 'GET':
+      case 'RGET': {
         const [seq, off, len] = args.map(Number);
-        const r = this.runs.find((x) => x.seq === seq);
+        const r = (cmd === 'RGET' ? this.races : this.runs).find((x) => x.seq === seq);
         if (!r) return this._text('{"err":"NOT_FOUND"}');
         if (off >= r.data.length) return this._text('{"err":"BAD_OFFSET"}');
         const n = Math.min(len, 4096, r.data.length - off);
@@ -275,7 +329,8 @@ export class DemoTransport {
       this.vmax = Math.max(this.vmax, v);
       const msg = { live: 1, v: +v.toFixed(3), v_max: +this.vmax.toFixed(3), v_front: +vf.toFixed(3), slip,
         rpm: Math.round(vf / (Math.PI * 0.064) * 5 * 60), thr, thr_pct: (thr - 1500) / 5, ax: +ax.toFixed(3),
-        zupt: v === 0 ? 1 : 0, state: thr > 1600 && t < 5.5 ? 'RECORDING' : 'IDLE' };
+        zupt: v === 0 ? 1 : 0, state: thr > 1600 && t < 5.5 ? 'RECORDING' : 'IDLE',
+        race: t >= 2 && t < 12 ? 'RECORDING' : 'IDLE', race_s: Math.max(0, Math.round(t - 2)) };
       this._text(JSON.stringify(msg));
     }, 50);
   }

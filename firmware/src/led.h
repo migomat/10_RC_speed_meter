@@ -5,6 +5,7 @@
 
 struct LedInputs {
   bool recording, saving, error, no_throttle, learning, connected, unread_runs;
+  bool race_recording, race_full;
 };
 
 void led_begin(void);

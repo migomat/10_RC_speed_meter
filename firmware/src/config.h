@@ -6,9 +6,9 @@
 #include <stdint.h>
 
 #define FW_VERSION_MAJOR    1
-#define FW_VERSION_MINOR    0
+#define FW_VERSION_MINOR    1
 #define FW_VERSION_PATCH    0
-#define FW_VERSION_STR      "1.0.0"
+#define FW_VERSION_STR      "1.1.0"
 
 // ---------------------------------------------------------------- hall
 // Tryb czujnika halla: 1 (tylko linia A) albo 3 (A/B/C).
@@ -88,11 +88,28 @@
 
 // ---------------------------------------------------------------- flash
 #define FLASH_SLOT_SIZE     (128 * 1024)  // wielokrotność bloku kasowania 64 kB
-#define FLASH_NUM_SLOTS     16            // 16 × 128 kB = 2 MB
+#define FLASH_TOTAL_SIZE    (2 * 1024 * 1024)  // P25Q16H
+#define FLASH_NUM_SLOTS     8             // starty: 8 × 128 kB = 1 MB, reszta = obszar wyścigów
 #define FLASH_ERASE_BLOCK   (64 * 1024)
 #define FLASH_SLOT_HDR_SIZE 256           // nagłówek slotu = 1 strona
 #define GET_BLOCK_MAX       4096          // [B] maks. rozmiar bloku przy pobieraniu
 #define SAVE_CHUNK_BYTES    1024          // [B] zapis na pętlę główną w SAVING
+
+// ---------------------------------------------------------------- wyścigi
+// Ciągły zapis całego wyścigu do drugiej części flash (bez nadpisywania):
+// kasowanie tylko w całości komendą RERASE z aplikacji, pełna pamięć = stop.
+#define RACE_AREA_ADDR      (FLASH_NUM_SLOTS * FLASH_SLOT_SIZE)
+#define RACE_AREA_SIZE      (FLASH_TOTAL_SIZE - RACE_AREA_ADDR)   // 1 MB
+#define RACE_RATE_HZ        50      // [Hz] próbka = średnia z SAMPLE_RATE_HZ / RACE_RATE_HZ taktów
+#define RACE_DECIM          (SAMPLE_RATE_HZ / RACE_RATE_HZ)
+#define RACE_PRETRIGGER_MS  1000    // [ms] zapis sprzed pierwszego gazu
+#define RACE_START_PCT      30      // [% do przodu] gaz rozpoczynający wyścig
+// [s] koniec wyścigu: koła stoją i gaz w neutrum (albo brak sygnału gazu) tak długo.
+// Dłużej niż typowe czekanie na sędziego po wywrotce – krótsza przerwa nie dzieli wyścigu.
+#define RACE_END_IDLE_S     30
+#define RACE_PERIOD_UNIT_US 4       // [us] rozdzielczość okresu obrotu w próbce (uint16 → maks. 262 ms)
+#define RACE_BUF_BYTES      8192    // [B] bufor RAM przed zapisem do flash (8 s przy 50 Hz)
+#define RACE_MAX_RECORDS    32      // maks. wyścigów w obszarze
 
 // ---------------------------------------------------------------- prędkościomierz
 // Te same wartości domyślne co tools/config.yaml i ustawienia aplikacji.
@@ -126,7 +143,8 @@
 
 // ---------------------------------------------------------------- format
 #define RUN_FORMAT_VERSION  1
-#define PROTOCOL_VERSION    1
+#define RACE_FORMAT_VERSION 1
+#define PROTOCOL_VERSION    2       // 2: komendy wyścigów RLIST/RGET/RDEL/RERASE/RSTOP
 
 // ---------------------------------------------------------------- debug
 // Komendy SIM_* (syntetyczne zbocza/gaz) dostępne tylko przez USB.

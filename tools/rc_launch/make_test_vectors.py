@@ -18,9 +18,10 @@ from pathlib import Path
 
 import numpy as np
 
-from .analyze import DEFAULT_CONFIG, analyze
-from .parse import (SAMPLE_DTYPE, SF_DIR_FORWARD, SF_DIR_VALID, SF_HALL_VALID, SF_THROTTLE_VALID,
-                    SF_TRIGGER, RF_NEUTRAL_LEARNED, RF_SIMULATED, build_run, parse_run)
+from .analyze import DEFAULT_CONFIG, analyze, analyze_race
+from .parse import (RACE_SAMPLE_DTYPE, RSF_GAP, SAMPLE_DTYPE, SF_DIR_FORWARD, SF_DIR_VALID,
+                    SF_HALL_VALID, SF_THROTTLE_VALID, SF_TRIGGER, RF_NEUTRAL_LEARNED, RF_SIMULATED,
+                    build_race, build_run, parse_race, parse_run)
 
 G = 9.80665
 FS = 500
@@ -232,6 +233,140 @@ SCENARIOS = {
 N_CHECK = 60
 
 
+# ------------------------------------------------------------------ wyścigi
+# Tor: owal – prosta L, półokrąg R, prosta L, półokrąg R (lewe zakręty).
+# Próbki 50 Hz jak w firmware (race.cpp): przyrost zboczy, okres obrotu w
+# jednostkach 4 µs, średnie IMU i gazu.
+RACE_SCENARIOS = {
+    "race_oval": dict(laps=5, straight=12.0, radius=3.0, v_straight=11.0, v_turn=5.5,
+                      hall_lines=1, end_reason=3, tail_s=5.0, padding=0, gap_at=None, seq=21),
+    "race_recovered": dict(laps=2, straight=10.0, radius=2.5, v_straight=9.0, v_turn=5.0,
+                           hall_lines=3, end_reason=2, tail_s=2.0, padding=37, gap_at=400, seq=22),
+}
+
+
+def make_race_vector(scn: dict, seed: int):
+    rng = np.random.default_rng(seed)
+    fs, tick = 50, 500
+    lines = scn["hall_lines"]
+    epr = 2 * lines
+    m_per_rev = math.pi * 64.0e-3 / 5.0
+    L, R = scn["straight"], scn["radius"]
+    lap = 2 * L + 2 * math.pi * R
+    total = scn["laps"] * lap
+    # profil prędkości po drodze: prosta → v_straight, zakręt → v_turn, przejścia ±a
+    a_acc, a_brk = 6.0, 9.0
+
+    def v_target(d):
+        x = d % lap
+        seg = [(0, L, "s"), (L, L + math.pi * R, "t"), (L + math.pi * R, 2 * L + math.pi * R, "s"),
+               (2 * L + math.pi * R, lap, "t")]
+        for a0, a1, k in seg:
+            if a0 <= x < a1:
+                if k == "t":
+                    return scn["v_turn"]
+                # hamowanie przed końcem prostej
+                rem = a1 - x
+                vb = math.sqrt(scn["v_turn"] ** 2 + 2 * a_brk * rem)
+                return min(scn["v_straight"], vb)
+        return scn["v_turn"]
+
+    def curvature(d):
+        x = d % lap
+        if L <= x < L + math.pi * R or 2 * L + math.pi * R <= x < lap:
+            return 1.0 / R
+        return 0.0
+
+    pre = fs * 1                     # 1 s postoju przed gazem
+    dt = 1.0 / fs
+    v, d = 0.0, 0.0
+    rows = []
+    edges_prev = 0
+    yaw_bias = 0.6                   # [dps]
+    acc_bias = (0.012, -0.008, 0.0)  # [g] montaż
+    i = 0
+    phase_tail = 0
+    while True:
+        if i < pre:
+            thr, v_new = 1352, 0.0
+        elif d < total:
+            vt = v_target(d)
+            if vt > v:
+                v_new = min(vt, v + a_acc * dt)
+                thr = 1352 + 480
+            else:
+                v_new = max(vt, v - a_brk * dt)
+                thr = 1352 - 200 if vt < v - 0.5 else 1352 + 150
+        else:
+            v_new = max(0.0, v - a_brk * dt)
+            thr = 1352
+            if v_new == 0.0:
+                phase_tail += 1
+                if phase_tail > scn["tail_s"] * fs:
+                    break
+        a_long = (v_new - v) / dt
+        d += 0.5 * (v + v_new) * dt
+        v = v_new
+        a_lat = v * v * curvature(d)
+        yaw = math.degrees(v * curvature(d))
+        edges_now = int(d / m_per_rev * epr)
+        de = edges_now - edges_prev
+        edges_prev = edges_now
+        rpm = v / m_per_rev * 60.0
+        period = int(round(60e6 / rpm / 4)) if rpm > 400 else 0
+        noise = rng.normal(0, 0.004, 3)
+        ax = (a_long / G + acc_bias[0] + noise[0]) / ACC_SCALE
+        ay = (a_lat / G + acc_bias[1] + noise[1]) / ACC_SCALE
+        az = (1.0 + noise[2]) / ACC_SCALE
+        gz = (yaw + yaw_bias + rng.normal(0, 0.05)) / GYRO_SCALE
+        rows.append((min(de, 0xFFFF), min(period, 0xFFFF), thr, int(round(ax)), int(round(ay)),
+                     int(round(az)), int(round(rng.normal(0, 0.05) / GYRO_SCALE)),
+                     int(round(rng.normal(0, 0.05) / GYRO_SCALE)), int(round(gz)),
+                     SF_THROTTLE_VALID | (SF_HALL_VALID if period else 0), tick // fs))
+        i += 1
+    smp = np.array(rows, dtype=RACE_SAMPLE_DTYPE)
+    if scn["gap_at"]:
+        smp["flags"][scn["gap_at"]] |= RSF_GAP
+        smp["n_ticks"][scn["gap_at"]] = 30
+    hdr = dict(seq=scn["seq"], unix_s=1_793_000_000, boot_count=7, uptime_ms=120_000,
+               hall_lines=lines, motor_pole_pairs=1, edges_per_rev=epr, throttle_fwd_higher=1,
+               sample_rate_hz=fs, imu_odr_hz=833, accel_range_g=4, gyro_range_dps=500,
+               accel_scale_g=ACC_SCALE, gyro_scale_dps=GYRO_SCALE, throttle_neutral_us=1352,
+               throttle_full_us=500, trigger_index=pre, tick_rate_hz=tick, decim=tick // fs,
+               flags=RF_NEUTRAL_LEARNED | RF_SIMULATED, t0_us=123456, fw_version=0x010100,
+               period_unit_us=4, pretrigger_ms=1000, end_idle_s=30, start_pct=30,
+               hall_pullup_v_x10=38, hall_timeout_us=80000 if lines == 1 else 50000,
+               hall_min_edge_us=300)
+    data = build_race(hdr, smp, scn["end_reason"], scn["padding"])
+    truth = dict(distance_m=total, laps=scn["laps"], lap_m=lap,
+                 heading_total_deg=360.0 * scn["laps"])
+    return data, truth
+
+
+def race_expected_for(data: bytes, cfg: dict) -> dict:
+    res = analyze_race(parse_race(data), cfg)
+    sr = res["series"]
+    n = len(sr["t"])
+    idx = sorted(set(np.linspace(0, n - 1, N_CHECK).astype(int).tolist()))
+
+    def clean(x):
+        x = float(x)
+        return None if math.isnan(x) else x
+
+    return dict(
+        config=cfg,
+        metrics={k: clean(v) for k, v in res["metrics"].items()},
+        warnings=res["warnings"],
+        end_reason=res["end_reason"],
+        i_start=res["i_start"],
+        i_last=res["i_last"],
+        check_idx=idx,
+        series={k: [clean(sr[k][i]) for i in idx]
+                for k in ("t", "throttle_pct", "rpm", "v_front", "d_front", "a_long", "a_lat",
+                          "yaw_rate", "heading_deg")},
+    )
+
+
 def expected_for(data: bytes, cfg: dict) -> dict:
     run = parse_run(data)
     res = analyze(run, cfg)
@@ -284,6 +419,22 @@ def main(argv=None):
               f"esc={m['esc_delay_s'] * 1000:.1f} ms (ruch od {truth['motion_start_s'] * 1000:.0f})")
     (out / "index.json").write_text(json.dumps(index, indent=1))
     (demo / "index.json").write_text(json.dumps(index, indent=1))
+    races = []
+    for i, (name, scn) in enumerate(RACE_SCENARIOS.items()):
+        data, truth = make_race_vector(scn, seed=200 + i)
+        (out / f"{name}.bin").write_bytes(data)
+        exp = race_expected_for(data, cfg)
+        exp["truth"] = truth
+        exp["name"] = name
+        (out / f"{name}.expected.json").write_text(json.dumps(exp, indent=1))
+        (demo / f"{name}.bin").write_bytes(data)
+        races.append(name)
+        m = exp["metrics"]
+        print(f"{name:20s} {m['duration_s']:.1f} s  droga {m['distance_m']:.1f} m (prawda "
+              f"{truth['distance_m']:.1f})  kurs {m['heading_total_deg']:.0f}° "
+              f"(prawda {truth['heading_total_deg']:.0f})  vmax {m['v_front_max']:.2f}")
+    (out / "races.json").write_text(json.dumps(races, indent=1))
+    (demo / "races.json").write_text(json.dumps(races, indent=1))
 
 
 if __name__ == "__main__":

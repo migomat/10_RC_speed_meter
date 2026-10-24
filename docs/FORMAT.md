@@ -79,3 +79,79 @@ Slot 128 kB; strona 0 = nagłówek, każde pole w osobnym słowie 32-bit
 (programowane niezależnie, przejścia stanów tylko 1→0):
 `+0 magic "X4FS"`, `+4 seq`, `+8 stan` (bajt niski: FF wolny, FE zapis, FC kompletny,
 F8 pobrany), `+12 długość`, `+16 CRC` (= crc32 startu). Dane startu od offsetu 256.
+
+## Układ flash (2 MB)
+
+| Adres | Obszar |
+|---|---|
+| 0x000000–0x0FFFFF | 8 slotów startów po 128 kB (`FLASH_NUM_SLOTS`) – bufor pierścieniowy |
+| 0x100000–0x1FFFFF | obszar wyścigów 1 MB (`RACE_AREA_*`) – zapis po kolei, kasowanie w całości |
+
+# Format pliku wyścigu (wersja 1)
+
+Ciągły zapis całego wyścigu, `RACE_RATE_HZ` = 50 Hz. Źródło prawdy: `run_format.h`
+(`RaceHeader`, `RaceSample`, `RaceTrailer`); dekodery: `format.js` (`parseRace`),
+`parse.py` (`parse_race`). Zmiana = podbicie `RACE_FORMAT_VERSION` we wszystkich trzech.
+
+```
+[RaceHeader 128 B][RaceSample × n (20 B)][wypełnienie – opcjonalne][RaceTrailer 16 B]
+```
+
+Trailer to zawsze ostatnie 16 B pliku. Wypełnienie pojawia się tylko w wyścigu
+domkniętym po zaniku zasilania (trailer trafia na następną czystą stronę flash);
+parser je pomija, CRC je obejmuje.
+
+## RaceHeader (128 B)
+
+Pola 0–47 jak w `RunHeader` (magic `0x4C463458` „X4FL”, `format_version` = 1, seq –
+wspólna numeracja ze startami, unix_s, boot_count, uptime_ms w chwili gazu, konfiguracja
+halla, `sample_rate_hz` = 50, zakresy i skale IMU, neutrum gazu). Dalej:
+
+| off | typ | pole | opis |
+|---|---|---|---|
+| 48 | u32 | trigger_index | indeks próbki, w której wciśnięto gaz (przed nią 1 s postoju) |
+| 52 | u16 | tick_rate_hz | 500 – jednostka `n_ticks` |
+| 54 | u16 | decim | 10 taktów na próbkę |
+| 56 | u32 | flags | jak w starcie (czas ustawiony, neutrum, błąd IMU, dane syntetyczne) |
+| 60 | u32 | t0_us | zegar Xiao na końcu pierwszej próbki |
+| 64 | u16 | sample_size | 20 |
+| 66 | u16 | trailer_size | 16 |
+| 68 | u32 | fw_version | |
+| 72 | u16 | period_unit_us | 4 |
+| 74 | u16 | pretrigger_ms | 1000 |
+| 76 | u16 | end_idle_s | 30 |
+| 78 | u8 | start_pct | 30 |
+| 79 | u8 | hall_pullup_v_x10 | |
+| 80 | u32 | hall_timeout_us | |
+| 84 | u16 | hall_min_edge_us | |
+| 86 | 42 B | reserved | zera |
+
+## RaceSample (20 B) – średnia z 10 taktów 500 Hz
+
+```c
+uint16_t edges;        // przyrost licznika zboczy w okresie próbki (droga = Σ edges / EDGES_PER_REV · obwód/FDR)
+uint16_t period_rev;   // ostatni okres obrotu silnika w jednostkach 4 µs, 0 = postój/nieznany
+uint16_t throttle_us;  // średnia z poprawnych impulsów, 0 = brak sygnału
+int16_t  ax, ay, az;   // średnie surowe LSB (uśrednienie = filtr antyaliasingowy)
+int16_t  gx, gy, gz;
+uint8_t  flags;        // bity 0–5 jak w Sample (OR z okresu), 0x40 przerwa (zgubione próbki), bit 7 zawsze 0
+uint8_t  n_ticks;      // czas próbki w taktach 2 ms (zwykle 10; więcej po przerwie), 1..254
+```
+
+Czas próbki = Σ n_ticks / tick_rate_hz (koniec próbki), względem próbki `trigger_index`.
+Bit 7 flag = 0 i `n_ticks` ≠ 0xFF odróżniają próbkę od skasowanego flash (odtwarzanie po zaniku zasilania).
+
+## RaceTrailer (16 B)
+
+`u32 magic 0x45463458 ("X4FE") | u32 n_samples | u8 end_reason | 3 B zera | u32 crc32`
+
+`end_reason`: 0 postój `RACE_END_IDLE_S`, 1 koniec pamięci, 2 zanik zasilania (domknięty przy starcie),
+3 komenda `RSTOP`. `crc32` = CRC32 IEEE wszystkich bajtów pliku przed tym polem (to samo w `RLIST`).
+
+## Rekord wyścigu we flash (tylko na urządzeniu)
+
+Rekordy od granic stron 256 B, jeden za drugim. Prefiks 32 B (słowa 32-bit, przejścia 1→0):
+`+0 magic "X4FP"`, `+4 seq`, `+8 stan` (FF wolny, FE zapis, FC kompletny, F8 pobrany, 00 pusty),
+`+12 długość pliku`, `+16 CRC`. Plik wyścigu od offsetu 32. Przy starcie: skan rekordów (weryfikacja
+CRC), rekord FE → zliczenie poprawnych próbek, trailer na następnej czystej stronie, stan FC; reszta
+obszaru musi być skasowana (inaczej stan `DIRTY` – wymaga `RERASE FORCE`).

@@ -1,6 +1,6 @@
 // Service worker – praca offline. Wszystkie zasoby lokalne (bez CDN).
 // Zmiana dowolnego pliku aplikacji = podbicie CACHE.
-const CACHE = 'x4f-v1.0.3';
+const CACHE = 'x4f-v1.1.0';
 const ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './vendor/uPlot.iife.min.js', './vendor/uPlot.min.css',
@@ -9,6 +9,7 @@ const ASSETS = [
   './icons/icon-192.png', './icons/icon-512.png', './icons/icon-maskable-512.png',
   './demo/index.json', './demo/mode1_grip.bin', './demo/mode1_slip.bin', './demo/mode3_grip.bin',
   './demo/mode3_slip.bin', './demo/mode1_slip_noedges.bin', './demo/mode1_lifted.bin',
+  './demo/races.json', './demo/race_oval.bin', './demo/race_recovered.bin',
 ];
 
 self.addEventListener('install', (e) => {

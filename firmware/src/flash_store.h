@@ -52,5 +52,14 @@ uint32_t flash_boot_count(void);         // ten rozruch
 uint32_t flash_overwritten_unread(void);
 // Testy: kolejność slotów do LIST (od najstarszego)
 int      flash_sorted(int* out_idx, int max);
+// Obszar wyścigów (RACE_AREA_ADDR..+RACE_AREA_SIZE) – dostęp surowy, adresy
+// bezwzględne. Logika rekordów: race.cpp.
+bool     flash_raw_busy(void);           // trwa zapis/kasowanie (bez czekania)
+bool     flash_raw_read(uint32_t addr, void* buf, uint32_t len);
+bool     flash_raw_write(uint32_t addr, const void* data, uint32_t len);
+void     flash_race_erase_start(void);   // kasowanie całego obszaru w tle (flash_poll)
+bool     flash_race_erasing(void);
+void     flash_note_seq(uint32_t seq);   // seq / boot_count z wyścigów (wspólna numeracja)
+void     flash_note_boot(uint32_t boot);
 // Test zaniku zasilania: reset w połowie zapisu danych
 extern volatile uint32_t g_flash_test_reset_at;

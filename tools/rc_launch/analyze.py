@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from .estimator import DEFAULT_PARAMS, EstState, est_step
-from .parse import Run, parse_run
+from .parse import RSF_GAP, Race, Run, file_kind, parse_race, parse_run
 
 G = 9.80665
 
@@ -38,6 +38,7 @@ DEFAULT_CONFIG = dict(
     rest_gyro_std_dps=1.5,
     rest_acc_std_g=0.06,
     edge_min_us=300,
+    race_lowpass_hz=5.0,
     estimator=dict(DEFAULT_PARAMS),
 )
 
@@ -449,8 +450,115 @@ def compute_metrics(sr: dict, i0: int, vmin: float, t_first_edge: float) -> dict
     )
 
 
+# ------------------------------------------------------------------ wyścig
+# Analiza całego wyścigu (próbki uśrednione RACE_RATE_HZ). Spec wspólna z
+# analyzeRace() w analysis.js. Podział na okrążenia – osobny krok (później).
+def analyze_race(race: Race, cfg: dict | None = None) -> dict:
+    cfg = cfg or load_config()
+    h = race.header
+    s = race.samples
+    n = len(s)
+    warnings = []
+    if n < 2:
+        raise ValueError("Za mało próbek wyścigu")
+    fs = float(h["sample_rate_hz"])
+    t = race.t_s
+    ti = min(int(h["trigger_index"]), n - 1)
+    dt = np.array([float(s["n_ticks"][i]) / float(h["tick_rate_hz"]) for i in range(n)])
+
+    ka, kg = float(h["accel_scale_g"]), float(h["gyro_scale_dps"])
+    a_fwd, a_left, a_up = map_axes(s["ax"] * ka, s["ay"] * ka, s["az"] * ka, cfg["imu_axes"])
+    g_fwd, g_left, g_up = map_axes(s["gx"] * kg, s["gy"] * kg, s["gz"] * kg, cfg["imu_axes"])
+
+    # bias: próbki przed gazem bez zboczy (auto stało na starcie)
+    rest = [i for i in range(ti) if int(s["edges"][i]) == 0]
+    if len(rest) >= 10:
+        rn = float(len(rest))
+        a_ref_f = sum(float(a_fwd[i]) for i in rest) / rn
+        a_ref_l = sum(float(a_left[i]) for i in rest) / rn
+        gb_up = sum(float(g_up[i]) for i in rest) / rn
+    else:
+        warnings.append("brak postoju przed startem – bez korekty biasu IMU")
+        a_ref_f = a_ref_l = gb_up = 0.0
+
+    neutral = h["throttle_neutral_us"]
+    full = h["throttle_full_us"] or 500
+    sign = 1.0 if h["throttle_fwd_higher"] else -1.0
+    thr_pct = np.array([((int(w) - neutral) * 100.0 / full * sign) if (w and neutral) else 0.0
+                        for w in s["throttle_us"]])
+
+    epr = int(h["edges_per_rev"])
+    m_per_rev = math.pi * cfg["front_tire_diameter_mm"] * 1e-3 / cfg["final_drive_ratio"]
+    unit = float(h["period_unit_us"])
+    rpm = np.array([60e6 / (int(p) * unit) if int(p) > 0 else 0.0 for p in s["period_rev"]])
+    v_front = np.array([float(r) / 60.0 * m_per_rev for r in rpm])
+    d_front = np.zeros(n)
+    acc = 0
+    for i in range(n):
+        acc += int(s["edges"][i])
+        d_front[i] = acc / epr * m_per_rev
+
+    fc = float(cfg["race_lowpass_hz"])
+    a_long = filtfilt_butter2([G * (float(a_fwd[i]) - a_ref_f) for i in range(n)], fc, fs)
+    a_lat = filtfilt_butter2([G * (float(a_left[i]) - a_ref_l) for i in range(n)], fc, fs)
+    yaw_rate = np.array([float(g_up[i]) - gb_up for i in range(n)])
+    heading = np.zeros(n)
+    hd = 0.0
+    for i in range(n):
+        if i > 0:
+            hd += yaw_rate[i] * dt[i]
+        heading[i] = hd
+
+    # koniec jazdy: ostatnia próbka z ruchem albo gazem poza neutrum
+    i_last = ti
+    for i in range(n - 1, ti - 1, -1):
+        if int(s["edges"][i]) > 0 or abs(thr_pct[i]) >= 10.0:
+            i_last = i
+            break
+    gaps = int(sum(1 for f in s["flags"] if int(f) & RSF_GAP))
+    if gaps:
+        warnings.append(f"{gaps} przerw w zapisie (bufor RAM pełny)")
+
+    def arg_max(y, i_from, i_to):
+        best, bi = float("-inf"), i_from
+        for i in range(i_from, i_to + 1):
+            if y[i] > best:
+                best, bi = float(y[i]), i
+        return best, bi
+
+    vmax, iv = arg_max(v_front, ti, i_last)
+    rmax, ir = arg_max(rpm, ti, i_last)
+    alat_max, _ = arg_max([abs(float(x)) for x in a_lat], ti, i_last)
+    along_max, _ = arg_max(a_long, ti, i_last)
+    brake_max, _ = arg_max([-float(x) for x in a_long], ti, i_last)
+    cnt = i_last - ti + 1
+    full_thr = sum(1 for i in range(ti, i_last + 1) if thr_pct[i] > 90.0) / cnt
+    metrics = dict(
+        duration_s=float(t[i_last] - t[ti]),
+        distance_m=float(d_front[i_last] - d_front[ti]),
+        v_front_max=vmax,
+        v_front_max_t=float(t[iv]),
+        v_front_avg=float((d_front[i_last] - d_front[ti]) / max(t[i_last] - t[ti], 1e-9)),
+        rpm_max=rmax,
+        rpm_max_t=float(t[ir]),
+        a_long_max_g=along_max / G,
+        brake_max_g=brake_max / G,
+        a_lat_max_g=alat_max / G,
+        full_throttle_frac=full_thr,
+        heading_total_deg=float(heading[i_last] - heading[ti]),
+        gaps=gaps,
+    )
+    series = dict(t=t, throttle_pct=thr_pct, rpm=rpm, v_front=v_front, d_front=d_front,
+                  a_long=a_long, a_lat=a_lat, yaw_rate=yaw_rate, heading_deg=heading)
+    return dict(series=series, metrics=metrics, warnings=warnings, header=h,
+                end_reason=race.end_reason, i_start=ti, i_last=i_last)
+
+
 def analyze_file(path, cfg=None):
-    return analyze(parse_run(open(path, "rb").read()), cfg)
+    data = open(path, "rb").read()
+    if file_kind(data) == "race":
+        return analyze_race(parse_race(data), cfg)
+    return analyze(parse_run(data), cfg)
 
 
 def main(argv=None):

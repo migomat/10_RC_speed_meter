@@ -249,9 +249,14 @@ class Device:
     def set_time(self, unix_s: int | None = None):
         return self.command(f"TIME {int(unix_s if unix_s is not None else time.time())}")
 
-    def get_block(self, seq: int, offset: int, length: int, timeout: float = 5.0) -> bytes:
+    def list_races(self):
+        """Wyścigi (protokół ≥ 2): lista i stan obszaru."""
+        return self.command("RLIST")
+
+    def get_block(self, seq: int, offset: int, length: int, timeout: float = 5.0,
+                  cmd: str = "GET") -> bytes:
         self._drain()
-        self.link.write(f"GET {seq} {offset} {length}\n".encode())
+        self.link.write(f"{cmd} {seq} {offset} {length}\n".encode())
         t_end = time.time() + timeout
         while time.time() < t_end:
             try:
@@ -275,15 +280,16 @@ class Device:
         raise ProtocolError("Timeout GET")
 
     def download(self, run: dict, block: int = GET_BLOCK_MAX, retries: int = 3, progress=None,
-                 resume: bytes = b"") -> bytes:
-        """Pobiera start blokami; wznawia od len(resume). Weryfikuje CRC całości."""
+                 resume: bytes = b"", race: bool = False) -> bytes:
+        """Pobiera start (albo wyścig: race=True) blokami; wznawia od len(resume).
+        Weryfikuje CRC całości."""
         seq, total = run["seq"], run["len"]
         buf = bytearray(resume)
         while len(buf) < total:
             n = min(block, total - len(buf))
             for attempt in range(retries + 1):
                 try:
-                    buf += self.get_block(seq, len(buf), n)
+                    buf += self.get_block(seq, len(buf), n, cmd="RGET" if race else "GET")
                     break
                 except DeviceBusy:
                     time.sleep(0.5)
@@ -292,14 +298,27 @@ class Device:
                         raise
             if progress:
                 progress(len(buf), total)
-        if run_crc(bytes(buf)) != run["crc"]:
-            raise ProtocolError("CRC startu niezgodne")
+        crc = (zlib.crc32(bytes(buf[:-4])) & 0xFFFFFFFF) if race else run_crc(bytes(buf))
+        if crc != run["crc"]:
+            raise ProtocolError("CRC wyścigu niezgodne" if race else "CRC startu niezgodne")
         return bytes(buf)
 
     def delete(self, seq: int):
         r = self.command(f"DEL {seq}")
         if r != f"OK DEL {seq}":
             raise ProtocolError(f"DEL: {r}")
+
+
+    def delete_race(self, seq: int):
+        """Oznacza wyścig jako pobrany (miejsce zwalnia dopiero erase_races)."""
+        r = self.command(f"RDEL {seq}")
+        if r != f"OK RDEL {seq}":
+            raise ProtocolError(f"RDEL: {r}")
+
+    def erase_races(self, force: bool = False):
+        r = self.command("RERASE FORCE" if force else "RERASE")
+        if r != "OK":
+            raise ProtocolError(f"RERASE: {r}")
 
 
 def run_crc(data: bytes) -> int:

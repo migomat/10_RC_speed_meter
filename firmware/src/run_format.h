@@ -118,5 +118,82 @@ static_assert(sizeof(BlockHeader) == 20, "BlockHeader 20 B");
 #define FRAME_TEXT          0x01
 #define FRAME_BINARY        0x02
 
+// ------------------------------------------------------------ wyścig
+// Plik wyścigu = RaceHeader + n × RaceSample + [wypełnienie] + RaceTrailer.
+// Trailer to zawsze ostatnie 16 B pliku (po zaniku zasilania między próbkami
+// a trailerem może być wypełnienie – liczy się do CRC, parser je pomija).
+#define RACE_MAGIC          0x4C463458u   // "X4FL"
+#define RACE_TRAILER_MAGIC  0x45463458u   // "X4FE"
+#define RACE_HEADER_SIZE    128
+
+// Flagi próbki wyścigu (bity 0..5 jak SF_*, z całego okresu próbki: OR, hall/dir z ostatniego taktu)
+#define RSF_GAP             0x40  // przed tą próbką zgubiono dane (przepełnienie bufora)
+#define RSF_MARK_ZERO       0x80  // zawsze 0 – odróżnia próbkę od pustego flash (0xFF)
+
+struct __attribute__((packed)) RaceSample {
+  uint16_t edges;         // przyrost licznika zboczy w okresie próbki
+  uint16_t period_rev;    // ostatni okres obrotu [RACE_PERIOD_UNIT_US], 0 = postój/nieznany
+  uint16_t throttle_us;   // średnia z poprawnych impulsów, 0 = brak sygnału
+  int16_t  ax, ay, az;    // średnie surowe z okresu próbki
+  int16_t  gx, gy, gz;
+  uint8_t  flags;         // SF_* | RSF_GAP; bit 7 = 0
+  uint8_t  n_ticks;       // czas próbki w taktach 1/SAMPLE_RATE_HZ (zwykle RACE_DECIM), 1..254
+};
+static_assert(sizeof(RaceSample) == 20, "RaceSample musi mieć 20 B");
+
+struct __attribute__((packed)) RaceHeader {
+  uint32_t magic;               //  0 RACE_MAGIC
+  uint16_t format_version;      //  4 RACE_FORMAT_VERSION
+  uint16_t header_size;         //  6 = 128
+  uint32_t seq;                 //  8 (wspólna numeracja ze startami)
+  uint32_t unix_s;              // 12 0 = nieznany
+  uint32_t boot_count;          // 16
+  uint32_t uptime_ms;           // 20 w chwili rozpoczęcia (gaz)
+  uint8_t  hall_lines;          // 24
+  uint8_t  motor_pole_pairs;    // 25
+  uint8_t  edges_per_rev;       // 26
+  uint8_t  throttle_fwd_higher; // 27
+  uint16_t sample_rate_hz;      // 28 RACE_RATE_HZ
+  uint16_t imu_odr_hz;          // 30
+  uint16_t accel_range_g;       // 32
+  uint16_t gyro_range_dps;      // 34
+  float    accel_scale_g;       // 36
+  float    gyro_scale_dps;      // 40
+  uint16_t throttle_neutral_us; // 44
+  uint16_t throttle_full_us;    // 46
+  uint32_t trigger_index;       // 48 indeks próbki, w której wciśnięto gaz
+  uint16_t tick_rate_hz;        // 52 SAMPLE_RATE_HZ (jednostka n_ticks)
+  uint16_t decim;               // 54 RACE_DECIM
+  uint32_t flags;               // 56 RF_*
+  uint32_t t0_us;               // 60 koniec pierwszej próbki (zegar Xiao)
+  uint16_t sample_size;         // 64 = 20
+  uint16_t trailer_size;        // 66 = 16
+  uint32_t fw_version;          // 68
+  uint16_t period_unit_us;      // 72 RACE_PERIOD_UNIT_US
+  uint16_t pretrigger_ms;       // 74
+  uint16_t end_idle_s;          // 76
+  uint8_t  start_pct;           // 78
+  uint8_t  hall_pullup_v_x10;   // 79
+  uint32_t hall_timeout_us;     // 80
+  uint16_t hall_min_edge_us;    // 84
+  uint8_t  reserved[42];        // 86..127 = 0
+};
+static_assert(sizeof(RaceHeader) == RACE_HEADER_SIZE, "RaceHeader musi mieć 128 B");
+
+// Powód zakończenia wyścigu
+#define RACE_END_IDLE       0   // postój RACE_END_IDLE_S
+#define RACE_END_FULL       1   // koniec pamięci
+#define RACE_END_RECOVERED  2   // zanik zasilania – domknięty przy starcie
+#define RACE_END_COMMAND    3   // RSTOP
+
+struct __attribute__((packed)) RaceTrailer {
+  uint32_t magic;               // RACE_TRAILER_MAGIC
+  uint32_t n_samples;
+  uint8_t  end_reason;          // RACE_END_*
+  uint8_t  reserved[3];
+  uint32_t crc32;               // CRC32 (IEEE) wszystkich bajtów pliku przed tym polem
+};
+static_assert(sizeof(RaceTrailer) == 16, "RaceTrailer 16 B");
+
 // Specjalny seq startu, który został tylko w RAM (błąd zapisu flash)
 #define RAM_RUN_SEQ         0u

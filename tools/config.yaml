@@ -10,6 +10,7 @@ imu_axes:                    # mapowanie osi płytki na osie auta
 # = −ω wokół osi „left” (prawoskrętny układ forward/left/up).
 pitch_axis_gyro: "y"         # informacyjnie – oś płytki odpowiadająca „left”
 lowpass_hz: 25
+race_lowpass_hz: 5          # [Hz] filtr przyspieszeń w analizie wyścigu (próbki 50 Hz)
 v_min_mps: 0.3
 # Wykrywanie spoczynku przed startem (bias IMU)
 rest_gyro_std_dps: 1.5

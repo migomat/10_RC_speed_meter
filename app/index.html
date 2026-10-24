@@ -50,6 +50,14 @@
     </div>
 
     <div class="card">
+      <h2>Pamięć wyścigów</h2>
+      <p id="raceDevInfo" class="muted">Połącz się, aby zobaczyć stan.</p>
+      <div id="raceBar" class="progress hidden"><div></div></div>
+      <button id="btnRaceErase" class="danger hidden">Skasuj pamięć wyścigów</button>
+      <p id="raceEraseHint" class="muted small"></p>
+    </div>
+
+    <div class="card">
       <h2>Podgląd na żywo</h2>
       <label class="switch"><input type="checkbox" id="liveToggle"> LIVE</label>
       <div id="liveBox" class="kv"></div>
@@ -77,6 +85,7 @@
       <div class="slipbar"><span id="spdSlip" class="slip ok">przyczepność</span></div>
       <div class="speed-small"><span>koła: <b id="spdFront">0,0</b></span><span>gaz: <b id="spdThr">–</b></span><span id="spdState"></span></div>
       <div class="speed-small"><span>obroty: <b id="spdRpm">0</b> rpm</span><span>maks.: <b id="spdRpmMax">0</b> rpm</span></div>
+      <div class="speed-small"><span id="spdRace"></span></div>
     </div>
     <p id="spdHint" class="muted center">Połącz się z urządzeniem albo włącz tryb demo.</p>
   </section>
@@ -120,6 +129,44 @@
     </div>
   </section>
 
+  <!-- ======================= Lista wyścigów -->
+  <section id="view-races" class="view">
+    <div class="card row">
+      <span id="racesCount" class="muted"></span>
+    </div>
+    <div id="racesList" class="list"></div>
+  </section>
+
+  <!-- ======================= Wyścig (szczegóły) -->
+  <section id="view-race" class="view">
+    <div class="card">
+      <button id="raceBack" class="link">← Wyścigi</button>
+      <h2 id="raceTitle">Wyścig</h2>
+      <p id="raceMeta" class="muted"></p>
+      <p id="raceWarn" class="warn hidden"></p>
+      <div class="btnrow">
+        <button data-rrange="60">1 min</button>
+        <button data-rrange="180">3 min</button>
+        <button data-rrange="all">całość</button>
+      </div>
+    </div>
+    <div id="raceCharts" class="charts"></div>
+    <div class="card">
+      <h3>Metryki</h3>
+      <div id="raceMetrics" class="metrics"></div>
+      <p class="muted small">Podział na okrążenia – po pierwszych prawdziwych wyścigach.</p>
+    </div>
+    <div class="card">
+      <h3>Tag i notatka</h3>
+      <div class="row"><input id="raceTag" placeholder="tag"><button id="raceTagSave">Zapisz</button></div>
+      <textarea id="raceNote" rows="2" placeholder="notatka"></textarea>
+      <div class="btnrow">
+        <button id="raceExportCsv">Eksport CSV</button>
+        <button id="raceDelete" class="danger">Usuń wyścig</button>
+      </div>
+    </div>
+  </section>
+
   <!-- ======================= Porównanie -->
   <section id="view-compare" class="view">
     <div class="card">
@@ -151,6 +198,7 @@
       </div>
       <label>Filtr dolnoprzepustowy [Hz]<input id="setLp" type="number" step="1" inputmode="decimal"></label>
       <label>v_min dla poślizgu [m/s]<input id="setVmin" type="number" step="0.05" inputmode="decimal"></label>
+      <label>Filtr przyspieszeń w wyścigu [Hz]<input id="setRaceLp" type="number" step="0.5" inputmode="decimal"></label>
       <details>
         <summary>Estymator prędkości (v_disp)</summary>
         <div id="setEst"></div>
@@ -178,6 +226,7 @@
   <button data-view="connect" class="active"><span>⚡</span>Połączenie</button>
   <button data-view="speed"><span>⏱</span>Prędkość</button>
   <button data-view="runs"><span>☰</span>Starty</button>
+  <button data-view="races"><span>⚑</span>Wyścigi</button>
   <button data-view="compare"><span>⇆</span>Porównanie</button>
   <button data-view="settings"><span>⚙</span>Ustawienia</button>
 </nav>

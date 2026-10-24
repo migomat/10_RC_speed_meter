@@ -28,10 +28,14 @@ void led_poll(const LedInputs& in, uint32_t now_ms) {
     set_rgb(blink4, false, false);                  // czerwony miga
   } else if (in.learning) {
     set_rgb(blink2, blink2, false);                 // żółty miga
+  } else if (in.race_full && (now_ms % 2000) >= 1000 && (now_ms % 2000) < 1300) {
+    set_rgb(true, true, false);                     // żółty błysk co 2 s – pamięć wyścigów pełna
   } else if (in.connected) {
     set_rgb(false, false, true);                    // niebieski
   } else if (in.unread_runs && (now_ms % 2000) < 100) {
     set_rgb(false, false, true);                    // krótki niebieski błysk co 2 s
+  } else if (in.race_recording && (now_ms % 1000) < 100) {
+    set_rgb(false, false, false);                   // zielony z przerwą co 1 s – zapis wyścigu
   } else {
     set_rgb(false, true, false);                    // zielony – uzbrojony
   }

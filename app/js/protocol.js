@@ -2,7 +2,7 @@
 // Notyfikacja = bajt typu (0x01 tekst, 0x02 ramka binarna) + dane.
 // Ramka binarna (GET): BlockHeader {magic, seq, offset, len, crc32} (20 B) + dane.
 
-import { crc32, runCrc } from './format.js';
+import { crc32, runCrc, raceCrc } from './format.js';
 
 export const FRAME_TEXT = 0x01;
 export const FRAME_BINARY = 0x02;
@@ -143,10 +143,13 @@ export class Device {
   vmaxReset() { return this.command('VMAX RESET'); }
   arm() { return this.command('ARM'); }
 
-  getBlock(seq, offset, len, timeoutMs = 6000) {
+  /** Wyścigi (protokół ≥ 2): {races, state, used, size}. */
+  rlist() { return this.command('RLIST'); }
+
+  getBlock(seq, offset, len, timeoutMs = 6000, cmd = 'GET') {
     return this._serial(async () => {
       this._reset();
-      await this.t.send(`GET ${seq} ${offset} ${len}\n`);
+      await this.t.send(`${cmd} ${seq} ${offset} ${len}\n`);
       const fr = await new Promise((resolve, reject) => {
         const timer = setTimeout(() => cleanup(new ProtocolError('Timeout pobierania bloku')), timeoutMs);
         const onFrame = (f) => cleanup(null, f);
@@ -178,7 +181,7 @@ export class Device {
    * Pobiera start blokami (do 3 ponowień na blok), wznawia od partial.length.
    * Weryfikuje CRC całości z LIST. Zwraca Uint8Array.
    */
-  async download(run, { partial = null, onProgress = null, blockSize = GET_BLOCK_MAX, retries = 3 } = {}) {
+  async download(run, { partial = null, onProgress = null, blockSize = GET_BLOCK_MAX, retries = 3, race = false } = {}) {
     const buf = new Uint8Array(run.len);
     let got = 0;
     if (partial && partial.length <= run.len) { buf.set(partial); got = partial.length; }
@@ -187,7 +190,7 @@ export class Device {
       let data = null, lastErr = null;
       for (let a = 0; a <= retries && !data; a++) {
         try {
-          data = await this.getBlock(run.seq, got, n);
+          data = await this.getBlock(run.seq, got, n, 6000, race ? 'RGET' : 'GET');
         } catch (e) {
           lastErr = e;
           if (e instanceof BusyError) await new Promise((r) => setTimeout(r, 700));
@@ -204,8 +207,8 @@ export class Device {
       got += data.length;
       if (onProgress) onProgress(got, run.len);
     }
-    if (runCrc(buf) !== run.crc) {
-      const err = new ProtocolError('CRC startu niezgodne');
+    if ((race ? raceCrc(buf) : runCrc(buf)) !== run.crc) {
+      const err = new ProtocolError(race ? 'CRC wyścigu niezgodne' : 'CRC startu niezgodne');
       err.partial = null;
       throw err;
     }
@@ -215,5 +218,17 @@ export class Device {
   async del(seq) {
     const r = await this.command(`DEL ${seq}`);
     if (r !== `OK DEL ${seq}`) throw new ProtocolError(`DEL: ${typeof r === 'string' ? r : JSON.stringify(r)}`);
+  }
+
+  /** Wyścig oznaczony jako pobrany (miejsce zwalnia dopiero rerase). */
+  async rdel(seq) {
+    const r = await this.command(`RDEL ${seq}`);
+    if (r !== `OK RDEL ${seq}`) throw new ProtocolError(`RDEL: ${typeof r === 'string' ? r : JSON.stringify(r)}`);
+  }
+
+  /** Kasowanie całej pamięci wyścigów; bez force tylko gdy wszystkie pobrane. */
+  async rerase(force = false) {
+    const r = await this.command(force ? 'RERASE FORCE' : 'RERASE');
+    if (r !== 'OK') throw new ProtocolError(`RERASE: ${typeof r === 'string' ? r : JSON.stringify(r)}`);
   }
 }

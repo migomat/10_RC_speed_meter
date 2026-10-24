@@ -24,6 +24,14 @@ static int  s_erase_block;
 static bool s_erase_running;
 
 #define BLOCKS_PER_SLOT (FLASH_SLOT_SIZE / FLASH_ERASE_BLOCK)
+#define RACE_BLOCKS     (RACE_AREA_SIZE / FLASH_ERASE_BLOCK)
+static_assert(RACE_AREA_ADDR + RACE_AREA_SIZE <= FLASH_TOTAL_SIZE, "Obszar wyścigów poza flash");
+static_assert(RACE_AREA_SIZE % FLASH_ERASE_BLOCK == 0, "Obszar wyścigów = wielokrotność 64 kB");
+
+// Kasowanie obszaru wyścigów: następny blok (od końca) i czy blok trwa.
+// Bloki slotów mają pierwszeństwo.
+static int  s_race_erase_left;
+static bool s_race_erase_running;
 
 static inline uint32_t slot_addr(int i) { return (uint32_t)i * FLASH_SLOT_SIZE; }
 
@@ -150,8 +158,20 @@ static void start_erase_block(void) {
   s_erase_running = true;
 }
 
+static void start_race_erase_block(void) {
+  uint32_t addr = RACE_AREA_ADDR + (uint32_t)(s_race_erase_left - 1) * FLASH_ERASE_BLOCK;
+  s_transport.runCommand(0x06);  // WREN
+  s_transport.eraseCommand(0xD8, addr);
+  s_race_erase_running = true;
+}
+
 void flash_poll(void) {
   if (!s_ok) return;
+  if (s_race_erase_running) {
+    if (wip()) return;
+    s_race_erase_running = false;
+    s_race_erase_left--;
+  }
   if (s_erase_running) {
     if (wip()) return;
     s_erase_running = false;
@@ -174,6 +194,10 @@ void flash_poll(void) {
       start_erase_block();
       return;
     }
+  }
+  if (s_race_erase_left > 0) {
+    start_race_erase_block();
+    return;
   }
   // Sprawdzanie pustości wolnych slotów po starcie (np. śmieci po innym
   // firmware) – jeden kawałek na wywołanie.
@@ -364,4 +388,39 @@ int flash_sorted(int* out_idx, int max) {
     out_idx[b + 1] = v;
   }
   return n;
+}
+
+// ------------------------------------------------------------ obszar wyścigów
+static inline bool in_race_area(uint32_t addr, uint32_t len) {
+  return addr >= RACE_AREA_ADDR && len <= RACE_AREA_SIZE &&
+         addr - RACE_AREA_ADDR <= RACE_AREA_SIZE - len;
+}
+
+bool flash_raw_busy(void) { return !s_ok || wip(); }
+
+bool flash_raw_read(uint32_t addr, void* buf, uint32_t len) {
+  if (!s_ok || !in_race_area(addr, len)) return false;
+  wait_ready();
+  return s_flash.readBuffer(addr, (uint8_t*)buf, len) == len;
+}
+
+bool flash_raw_write(uint32_t addr, const void* data, uint32_t len) {
+  if (!s_ok || !in_race_area(addr, len) || flash_race_erasing()) return false;
+  wait_ready();
+  return s_flash.writeBuffer(addr, (const uint8_t*)data, len) == len;
+}
+
+void flash_race_erase_start(void) {
+  if (!s_ok || flash_race_erasing()) return;
+  s_race_erase_left = RACE_BLOCKS;
+}
+
+bool flash_race_erasing(void) { return s_race_erase_left > 0; }
+
+void flash_note_seq(uint32_t seq) {
+  if (seq != 0xFFFFFFFFu && seq >= s_next_seq) s_next_seq = seq + 1;
+}
+
+void flash_note_boot(uint32_t boot) {
+  if (boot != 0xFFFFFFFFu && boot >= s_boot_count) s_boot_count = boot + 1;
 }

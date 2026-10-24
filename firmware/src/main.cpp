@@ -12,6 +12,7 @@
 #include "imu.h"
 #include "led.h"
 #include "logger.h"
+#include "race.h"
 #include "run_format.h"
 #include "sim.h"
 #include "throttle.h"
@@ -95,6 +96,8 @@ static void process_sample(const Sample& s) {
   g_live.ax_g = axis_val(a, IMU_AXIS_FORWARD, IMU_SIGN_FORWARD);
   g_live.zupt = s_es.zupt;
 
+  // Wyścig niezależnie od loggera startów (ten w SAVING nie przyjmuje próbek).
+  race_push(s, pct, s.throttle_us != 0, throttle_neutral_learned());
   logger_push(s, pct, s.throttle_us != 0);
 }
 
@@ -133,6 +136,7 @@ static void measure_service(void) {
   uint32_t now = timebase_now();
   imu_poll(now);
   drain_ticks(timebase_now());
+  race_poll();
 }
 
 // Błąd krytyczny (np. przepełnienie stosu) → reset zamiast zawieszenia.
@@ -186,6 +190,7 @@ void setup() {
   s_thr_ok = throttle_begin();
   s_imu_ok = imu_begin();
   s_flash_ok = flash_begin();
+  race_begin();                    // po skanie slotów: wspólna numeracja seq / boot
   logger_begin();
   if (!s_flash_ok) logger_set_error();
   est_default_params(&s_ep);
@@ -200,6 +205,7 @@ void loop() {
   drain_ticks(now);
   throttle_poll(now);
   logger_poll();
+  race_poll();
   if (logger_state() != LS_SAVING) flash_poll();
   if (vmax_reset_requested()) s_es.v_max = 0.0f;
 
@@ -213,7 +219,10 @@ void loop() {
   li.no_throttle = !throttle_signal_ok(now);
   li.learning = !throttle_neutral_learned();
   li.connected = ble_connected();
-  li.unread_runs = flash_count_runs() > 0 || logger_ram_run_available();
+  li.unread_runs = flash_count_runs() > 0 || logger_ram_run_available() || race_count_unread() > 0;
+  li.race_recording = race_recording();
+  li.race_full = race_state() == RS_FULL || race_state() == RS_DIRTY;
+  if (race_state() == RS_ERROR) li.error = true;
   led_poll(li, ms);
 
   uint32_t free_b = uxTaskGetStackHighWaterMark(nullptr) * 4;

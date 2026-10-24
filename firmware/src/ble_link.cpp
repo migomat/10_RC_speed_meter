@@ -8,6 +8,7 @@
 #include "hall.h"
 #include "imu.h"
 #include "logger.h"
+#include "race.h"
 #include "run_format.h"
 #include "sim.h"
 #include "throttle.h"
@@ -207,11 +208,12 @@ static void cmd_info(Link& l) {
            "{\"fw\":\"%s\",\"format\":%d,\"proto\":%d,\"hall_lines\":%d,\"pole_pairs\":%d,"
            "\"edges_per_rev\":%d,\"slot_size\":%lu,\"slots\":%d,\"sample_rate\":%d,"
            "\"get_block_max\":%d,\"max_samples\":%d,\"max_edges\":%lu,\"jedec\":\"%06lX\","
-           "\"name\":\"%s\"}",
+           "\"name\":\"%s\",\"race_rate\":%d,\"race_area\":%lu,\"race_sample_size\":%u}",
            FW_VERSION_STR, RUN_FORMAT_VERSION, PROTOCOL_VERSION, HALL_LINES, MOTOR_POLE_PAIRS,
            EDGES_PER_REV, (unsigned long)FLASH_SLOT_SIZE, FLASH_NUM_SLOTS, SAMPLE_RATE_HZ,
            GET_BLOCK_MAX, MAX_SAMPLES, (unsigned long)EDGE_LOG_LEN,
-           (unsigned long)flash_jedec_id(), BLE_NAME);
+           (unsigned long)flash_jedec_id(), BLE_NAME, RACE_RATE_HZ, (unsigned long)RACE_AREA_SIZE,
+           (unsigned)sizeof(RaceSample));
   send_text(l, s_out);
 }
 
@@ -226,7 +228,9 @@ static void cmd_status(Link& l) {
            "\"mtu\":%u,\"ble_pkts\":%lu,\"ble_waits\":%lu,\"ble_err\":%lu,"
            "\"reset_reason\":%lu,\"stack_free\":%lu,\"tick_overflows\":%lu,\"ble_last_err\":%lu,"
            "\"ble_last_len\":%lu,\"erased_slots\":%d,\"erasing\":%s,\"ble_dropped\":%lu,"
-           "\"hall_pins\":%u,\"armed\":%s,\"boot_gpregret\":%lu,\"boot_hf\":%lu}",
+           "\"hall_pins\":%u,\"armed\":%s,\"boot_gpregret\":%lu,\"boot_hf\":%lu,"
+           "\"race_state\":\"%s\",\"races\":%d,\"races_unread\":%d,\"race_used\":%lu,"
+           "\"race_size\":%lu,\"race_rec_s\":%lu,\"race_overflows\":%lu,\"race_scan_ms\":%lu}",
            logger_state_name(), throttle_neutral_us(), throttle_neutral_learned() ? "true" : "false",
            throttle_signal_ok(now) ? "true" : "false", throttle_tick_width(now),
            flash_count_runs() + (logger_ram_run_available() ? 1 : 0), flash_count_free(),
@@ -244,7 +248,10 @@ static void cmd_status(Link& l) {
            (unsigned long)g_tick_overflows, (unsigned long)s_tx_last_err,
            (unsigned long)s_tx_last_len, flash_count_erased(), flash_busy() ? "true" : "false",
            (unsigned long)s_tx_dropped, hall_pin_levels(), logger_armed() ? "true" : "false",
-           (unsigned long)g_boot_gpregret, (unsigned long)g_boot_hf);
+           (unsigned long)g_boot_gpregret, (unsigned long)g_boot_hf, race_state_name(), race_count(),
+           race_count_unread(), (unsigned long)race_used_bytes(), (unsigned long)race_size_bytes(),
+           (unsigned long)race_current_s(), (unsigned long)race_overflows(),
+           (unsigned long)race_scan_ms());
   send_text(l, s_out);
 }
 
@@ -276,14 +283,21 @@ static void cmd_list(Link& l) {
   send_text(l, s_out);
 }
 
-static void cmd_get(Link& l, uint32_t seq, uint32_t off, uint32_t len) {
+static void cmd_get(Link& l, uint32_t seq, uint32_t off, uint32_t len, bool race = false) {
   static uint8_t frame[sizeof(BlockHeader) + GET_BLOCK_MAX] __attribute__((aligned(4)));
   if (logger_busy()) return send_err(l, "BUSY");
   if (len == 0 || len > GET_BLOCK_MAX) return send_err(l, "BAD_LEN");
   uint8_t* data = frame + sizeof(BlockHeader);
   bool ok;
   uint32_t total;
-  if (seq == RAM_RUN_SEQ && logger_ram_run_available()) {
+  if (race) {
+    int i = race_find(seq);
+    if (i < 0) return send_err(l, "NOT_FOUND");
+    total = race_rec(i)->len;
+    if (off >= total) return send_err(l, "BAD_OFFSET");
+    if (off + len > total) len = total - off;
+    ok = race_read(i, off, data, len);
+  } else if (seq == RAM_RUN_SEQ && logger_ram_run_available()) {
     total = logger_ram_run_len();
     if (off >= total) return send_err(l, "BAD_OFFSET");
     if (off + len > total) len = total - off;
@@ -319,13 +333,51 @@ static void cmd_del(Link& l, uint32_t seq) {
   send_text(l, s_out);
 }
 
+static void cmd_rlist(Link& l) {
+  size_t p = snprintf(s_out, sizeof(s_out), "{\"races\":[");
+  for (int i = 0; i < race_count() && p < sizeof(s_out) - 160; i++) {
+    const RaceRec* r = race_rec(i);
+    p += snprintf(s_out + p, sizeof(s_out) - p,
+                  "%s{\"seq\":%lu,\"len\":%lu,\"crc\":%lu,\"unix\":%lu,\"boot\":%lu,"
+                  "\"uptime_ms\":%lu,\"n\":%lu,\"end\":%u,\"read\":%s}",
+                  i ? "," : "", (unsigned long)r->seq, (unsigned long)r->len, (unsigned long)r->crc,
+                  (unsigned long)r->unix_s, (unsigned long)r->boot_count,
+                  (unsigned long)r->uptime_ms, (unsigned long)r->n_samples, r->end_reason,
+                  r->state == SLOT_DOWNLOADED ? "true" : "false");
+  }
+  snprintf(s_out + p, sizeof(s_out) - p, "],\"state\":\"%s\",\"used\":%lu,\"size\":%lu}",
+           race_state_name(), (unsigned long)race_used_bytes(), (unsigned long)race_size_bytes());
+  send_text(l, s_out);
+}
+
+static void cmd_rdel(Link& l, uint32_t seq) {
+  if (!race_mark_downloaded(seq)) {
+    snprintf(s_out, sizeof(s_out), "{\"err\":\"NOT_FOUND\",\"seq\":%lu}", (unsigned long)seq);
+    return send_text(l, s_out);
+  }
+  snprintf(s_out, sizeof(s_out), "OK RDEL %lu", (unsigned long)seq);
+  send_text(l, s_out);
+}
+
+static void cmd_rerase(Link& l, bool force) {
+  int r = race_erase(force);
+  if (r == -1) return send_err(l, "BUSY");
+  if (r == -2) {
+    snprintf(s_out, sizeof(s_out), "{\"err\":\"UNREAD\",\"unread\":%d,\"state\":\"%s\"}",
+             race_count_unread(), race_state_name());
+    return send_text(l, s_out);
+  }
+  send_text(l, "OK");
+}
+
 static void send_live(Link& l) {
   snprintf(s_out, sizeof(s_out),
            "{\"live\":1,\"v\":%.3f,\"v_max\":%.3f,\"v_front\":%.3f,\"slip\":%d,\"rpm\":%.0f,"
-           "\"thr\":%u,\"thr_pct\":%.1f,\"ax\":%.3f,\"zupt\":%d,\"state\":\"%s\"}",
+           "\"thr\":%u,\"thr_pct\":%.1f,\"ax\":%.3f,\"zupt\":%d,\"state\":\"%s\",\"race\":\"%s\","
+           "\"race_s\":%lu}",
            g_live.v, g_live.v_max, g_live.v_front, g_live.spinning ? 1 : 0, g_live.rpm,
            g_live.throttle_us, g_live.throttle_pct, g_live.ax_g, g_live.zupt ? 1 : 0,
-           logger_state_name());
+           logger_state_name(), race_state_name(), (unsigned long)race_current_s());
   if (!l.is_ble) return send_text(l, s_out);
   size_t n = strlen(s_out);
   if (n + 1 >= sizeof(s_out)) return;
@@ -350,6 +402,14 @@ static void handle_line(Link& l, char* line) {
   }
   if (!strcmp(c, "GET") && argc >= 4) return cmd_get(l, U(1), U(2), U(3));
   if (!strcmp(c, "DEL") && argc >= 2) return cmd_del(l, U(1));
+  if (!strcmp(c, "RLIST")) return cmd_rlist(l);
+  if (!strcmp(c, "RGET") && argc >= 4) return cmd_get(l, U(1), U(2), U(3), true);
+  if (!strcmp(c, "RDEL") && argc >= 2) return cmd_rdel(l, U(1));
+  if (!strcmp(c, "RERASE")) return cmd_rerase(l, argc > 1 && !strcmp(argv[1], "FORCE"));
+  if (!strcmp(c, "RSTOP")) {
+    race_stop();
+    return send_text(l, "OK");
+  }
   if (!strcmp(c, "ARM")) {
     logger_arm();
     return send_text(l, "OK");
@@ -372,8 +432,11 @@ static void handle_line(Link& l, char* line) {
     else if (!strcmp(s, "GLITCH")) sim_glitch(argc > 2 ? U(2) : 10);
     else if (!strcmp(s, "OFF")) sim_off();
     else if (!strcmp(s, "RESETAT")) g_flash_test_reset_at = U(2);
+    else if (!strcmp(s, "RACELIMIT")) race_set_limit(U(2));    // [B] mniejszy obszar wyścigów
+    else if (!strcmp(s, "RACERESETAT")) race_set_reset_at(U(2));  // reset po n próbkach wyścigu
     else return send_err(l, "BAD_SIM");
     logger_set_sim_flag(true);
+    race_set_sim_flag(true);
     return send_text(l, "OK");
   }
   if (!strcmp(c, "BOOT") && !l.is_ble) {   // BOOT [UF2] – bootloader (wgrywanie bez RESET)

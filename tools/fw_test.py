@@ -177,15 +177,16 @@ def t_flash20(dev, a):
         dev.delete(r["seq"])
     time.sleep(0.5)
     ow0 = dev.status()["overwritten_unread"]
+    slots = int(dev.info()["slots"])          # 16 (fw 1.0), 8 (fw 1.1 – reszta flash na wyścigi)
     seqs = []
-    for i in range(20):
+    for i in range(slots + 4):
         rec, st = do_launch(dev, rpm=8000, ramp_ms=800)
         seqs.append(latest_run(dev)["seq"])
-        print(f"   start {i + 1}/20 seq={seqs[-1]} save={st['last_save_ms']} ms")
+        print(f"   start {i + 1}/{slots + 4} seq={seqs[-1]} save={st['last_save_ms']} ms")
     runs = dev.list_runs()
     st = dev.status()
-    check("16 startów w pamięci", len(runs) == 16, f"{len(runs)}")
-    check("16 najnowszych", [r["seq"] for r in runs] == seqs[-16:])
+    check(f"{slots} startów w pamięci", len(runs) == slots, f"{len(runs)}")
+    check(f"{slots} najnowszych", [r["seq"] for r in runs] == seqs[-slots:])
     check("overwritten_unread = 4", st["overwritten_unread"] - ow0 == 4, f"{st['overwritten_unread'] - ow0}")
 
 

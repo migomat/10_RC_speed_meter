@@ -2,7 +2,7 @@
 // Wyniki analizy liczone przy wyświetlaniu (zmiana ustawień działa wstecz).
 
 const DB_NAME = 'x4f-logger';
-const DB_VER = 1;
+const DB_VER = 2;   // 2: magazyn 'races' (wyścigi)
 let dbp = null;
 
 function db() {
@@ -17,6 +17,7 @@ function db() {
         s.createIndex('downloaded_at', 'downloaded_at');
       }
       if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      if (!d.objectStoreNames.contains('races')) d.createObjectStore('races', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -53,6 +54,22 @@ export async function updateRun(id, patch) {
   if (!r) return;
   Object.assign(r, patch);
   await putRun(r);
+}
+
+// Wyścigi – osobny magazyn (inny format pliku; lista startów, porównanie i analiza startów ich nie widzą)
+export function raceId(meta) {
+  return `race-${meta.crc >>> 0}-${meta.seq}-${meta.boot}`;
+}
+export function putRace(rec) { return tx('races', 'readwrite', (s) => s.put(rec)); }
+export function getRace(id) { return tx('races', 'readonly', (s) => s.get(id)); }
+export function deleteRace(id) { return tx('races', 'readwrite', (s) => s.delete(id)); }
+export function allRaces() { return tx('races', 'readonly', (s) => s.getAll()); }
+export async function hasRace(id) { return !!(await getRace(id)); }
+export async function updateRace(id, patch) {
+  const r = await getRace(id);
+  if (!r) return;
+  Object.assign(r, patch);
+  await putRace(r);
 }
 
 export function kvGet(key) { return tx('kv', 'readonly', (s) => s.get(key)); }

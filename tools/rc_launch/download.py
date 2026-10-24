@@ -3,9 +3,11 @@
   python -m rc_launch.download [--usb [PORT]] [--keep] [--tag TAG]   # pobierz wszystko
   python -m rc_launch.download --import x4f_baza_2026-10-18.json     # eksport z telefonu
   python -m rc_launch.download --live [--usb]                        # podgląd LIVE
+  python -m rc_launch.download --erase-races [--usb]                 # skasuj pamięć wyścigów
 
 Start jest kasowany z Xiao (DEL) dopiero po weryfikacji CRC i zapisie pliku
-na dysk; --keep wyłącza kasowanie.
+na dysk; --keep wyłącza kasowanie. Wyścigi są oznaczane jako pobrane (RDEL);
+pamięć wyścigów kasuje się w całości (--erase-races, tylko gdy wszystkie pobrane).
 """
 from __future__ import annotations
 
@@ -19,22 +21,24 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .parse import parse_run
+from .parse import file_kind, parse_race, parse_run
 from .protocol import BleLink, Device, SerialLink
 
 RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
 
 
-def run_filename(h: dict, tag: str = "", approx_unix: int = 0) -> str:
+def run_filename(h: dict, tag: str = "", approx_unix: int = 0, prefix: str = "") -> str:
     u = h["unix_s"] or approx_unix
     stamp = datetime.fromtimestamp(u).strftime("%Y%m%d_%H%M%S") if u else f"boot{h['boot_count']}_{h['uptime_ms'] // 1000:06d}s"
     safe = re.sub(r"[^\w-]+", "_", tag).strip("_")
-    return f"{stamp}_seq{h['seq']}" + (f"_{safe}" if safe else "")
+    return f"{prefix}{stamp}_seq{h['seq']}" + (f"_{safe}" if safe else "")
 
 
 def save_run(data: bytes, meta: dict, out: Path, tag: str = "") -> Path:
-    run = parse_run(data)                     # weryfikacja CRC i formatu
-    base = out / run_filename(run.header, tag, meta.get("approx_unix", 0))
+    """Zapis startu albo wyścigu (wg magic; wyścig: plik race_*.bin)."""
+    race = file_kind(data) == "race"
+    run = parse_race(data) if race else parse_run(data)   # weryfikacja CRC i formatu
+    base = out / run_filename(run.header, tag, meta.get("approx_unix", 0), "race_" if race else "")
     tmp = base.with_suffix(".bin.tmp")
     tmp.write_bytes(data)
     with open(tmp, "rb+") as f:
@@ -64,20 +68,39 @@ def download_all(dev: Device, out: Path, keep: bool, tag: str):
         print(f"\r  seq {r['seq']}: {len(data)} B, {len(data) / dt / 1024:.1f} kB/s → {path.name}")
         if not keep:
             dev.delete(r["seq"])
+    if int(dev.info().get("proto", 1)) < 2:
+        return
+    rl = dev.list_races()
+    races = [r for r in rl["races"] if not r.get("read")]
+    print(f"Wyścigi: {len(races)} niepobranych, pamięć {rl['used'] / 1024:.0f}/{rl['size'] / 1024:.0f} kB ({rl['state']})")
+    for r in races:
+        t0 = time.time()
+        data = dev.download(r, race=True,
+                            progress=lambda g, n: print(f"\r  wyścig {r['seq']}: {g}/{n} B", end=""))
+        dt = time.time() - t0
+        approx = 0
+        if not r["unix"] and r["boot"] == st["boot"]:
+            approx = int(time.time() - (st["uptime_ms"] - r["uptime_ms"]) / 1000)
+        path = save_run(data, dict(r, approx_unix=approx, downloaded_at=time.time()), out, tag)
+        print(f"\r  wyścig {r['seq']}: {len(data)} B, {len(data) / dt / 1024:.1f} kB/s → {path.name}")
+        if not keep:
+            dev.delete_race(r["seq"])
+    if races and not keep:
+        print("Wszystkie wyścigi zapisane – pamięć wyścigów można skasować: --erase-races")
 
 
 def import_export(path: Path, out: Path):
     obj = json.loads(path.read_text())
     out.mkdir(parents=True, exist_ok=True)
     n = 0
-    for r in obj.get("runs", []):
+    for r in obj.get("runs", []) + obj.get("races", []):
         data = base64.b64decode(r["raw_b64"])
         meta = {k: v for k, v in r.items() if k not in ("raw_b64", "raw")}
         p = save_run(data, meta, out, r.get("tag", ""))
         if r.get("note"):
             print(f"  {p.name}: {r['note']}")
         n += 1
-    print(f"Zaimportowano {n} startów do {out}")
+    print(f"Zaimportowano {n} plików (starty i wyścigi) do {out}")
 
 
 def live(dev: Device):
@@ -102,6 +125,9 @@ def main(argv=None):
     ap.add_argument("--out", default=str(RUNS_DIR))
     ap.add_argument("--import", dest="imp", help="plik eksportu z aplikacji (JSON)")
     ap.add_argument("--live", action="store_true")
+    ap.add_argument("--erase-races", action="store_true",
+                    help="skasuj pamięć wyścigów (tylko gdy wszystkie pobrane)")
+    ap.add_argument("--force", action="store_true", help="z --erase-races: także niepobrane / obce dane")
     a = ap.parse_args(argv)
     out = Path(a.out)
     if a.imp:
@@ -110,7 +136,10 @@ def main(argv=None):
     link = SerialLink(None if a.usb == "auto" else a.usb) if a.usb else BleLink("X4F")
     dev = Device(link)
     try:
-        if a.live:
+        if a.erase_races:
+            dev.erase_races(a.force)
+            print("Kasowanie pamięci wyścigów rozpoczęte")
+        elif a.live:
             live(dev)
         else:
             download_all(dev, out, a.keep, a.tag)

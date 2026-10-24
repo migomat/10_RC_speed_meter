@@ -3,6 +3,7 @@
 Logger startów samochodu RC Xray X4F (napęd na przód) na XIAO nRF52840 Sense.
 Urządzenie tylko podsłuchuje czujnik halla silnika i sygnał gazu, nagrywa IMU
 i zapisuje starty we flash. Pobieranie odbywa się przez BLE do aplikacji PWA na Androidzie.
+Drugi tryb (fw 1.1): **ciągły zapis całych wyścigów** (50 Hz) do osobnej części flash.
 Specyfikacja: `CLAUDE.md`. Okablowanie: `docs/WIRING.md`. Formaty: `docs/FORMAT.md`, `docs/PROTOCOL.md`.
 
 ```
@@ -35,7 +36,9 @@ node --test app/test/                                 # analysis.js vs wektory
 
 # pobieranie z PC
 cd tools && ../.venv/bin/python -m rc_launch.download          # BLE, kasuje po zapisie
-../.venv/bin/python -m rc_launch.download --usb --keep         # USB, bez kasowania
+../.venv/bin/python -m rc_launch.download --usb --keep         # USB, bez kasowania (starty i wyścigi)
+../.venv/bin/python -m rc_launch.download --usb --erase-races  # skasuj pamięć wyścigów (gdy wszystkie pobrane)
+../.venv/bin/python -m rc_launch.analyze runs/race_*.bin       # metryki wyścigu
 ../.venv/bin/python -m rc_launch.plot runs/*.bin --range 1
 ../.venv/bin/python -m rc_launch.compare runs/*.bin
 ```
@@ -54,6 +57,33 @@ dzięki service workerowi. Po każdej zmianie plików aplikacji podbij `CACHE` w
 
 Test lokalny: `python3 -m http.server 8765 --directory app`, potem
 `http://localhost:8765/#demo`, czyli tryb demo z wirtualnym Xiao.
+
+## Tryb wyścigu
+
+Obok startów (500 Hz, 4 s, bufor pierścieniowy) Xiao nagrywa **całe wyścigi**:
+
+* **Pamięć:** flash podzielony na pół – 8 slotów startów (1 MB) i obszar wyścigów (1 MB).
+* **Próbka 50 Hz, 20 B** (`RACE_RATE_HZ`): średnia z 10 taktów 500 Hz – przyrost zboczy halla
+  (dokładna droga), ostatni okres obrotu, średni gaz, średnie 6 osi IMU, czas w taktach 2 ms.
+  1 kB/s → **ok. 17 min jazdy** w 1 MB (100 Hz: 8,7 min, 20 Hz: 44 min – jedna stała w `config.h`).
+* **Start sam:** gaz > 30 % (`RACE_START_PCT`), z 1 s nagrania sprzed gazu (postój = bias IMU).
+* **Koniec:** koła stoją i gaz w neutrum (albo brak sygnału gazu – wyłączony odbiornik) przez
+  30 s (`RACE_END_IDLE_S`). Krótsze czekanie na sędziego nie dzieli wyścigu.
+* **Bez nadpisywania:** wyścigi dopisywane po kolei; pełna pamięć = koniec wyścigu i stop nagrywania
+  (LED: żółty błysk co 2 s) do skasowania z aplikacji. Kasowanie tylko w całości i tylko gdy wszystkie
+  wyścigi są pobrane (`RERASE`; `FORCE` – obszar z obcymi danymi lub świadome porzucenie).
+* **Zanik zasilania** (odłączenie LiPo w trakcie jazdy – normalne zakończenie): przy starcie rekord
+  domykany trailerem; giną tylko próbki z bufora RAM (≤ 0,3 s).
+* **Zapis nieblokujący:** bufor RAM 8 kB (`RACE_BUF_BYTES`, 8 s), zapis stron tylko gdy flash wolny,
+  także w czasie czekania na BLE. Pełny bufor → próbka gubiona, czas doliczany do następnej (flaga przerwy).
+* Wyścigi i starty działają jednocześnie (start spod świateł nagrywa się dodatkowo w 500 Hz).
+* **Aplikacja:** zakładka *Wyścigi* – lista, wykresy (gaz, prędkość kół, obroty, przyspieszenie
+  wzdłużne i boczne, prędkość skrętu), metryki, CSV, tagi; „Pobierz wszystko” pobiera też wyścigi,
+  karta *Pamięć wyścigów* pokazuje zajętość i kasowanie. Analiza: `analyze_race` / `analyzeRace`
+  (wspólne wektory `test_vectors/race_*.bin`).
+* **Podział na okrążenia** (tor stały): do zrobienia po pierwszych prawdziwych wyścigach – kurs
+  z całki żyroskopu (N × 360° na okrążenie) i powtarzalny profil prędkości / skrętu, dopasowanie
+  okrążeń do wzorcowego.
 
 ## Ustalenia sprzętowe (sprawdzone w źródłach i na płytce)
 
@@ -80,7 +110,11 @@ Test lokalny: `python3 -m http.server 8765 --directory app`, potem
 | Pobieranie USB | 77 kB/s | – |
 | Pobieranie BLE (bleak, BlueZ, BT 4.2) | 28 kB/s, MTU 247 | ≥ 20 kB/s |
 | LIVE | 20 Hz | 20 Hz |
-| RAM (statyczny) | tryb 1: 101 kB, tryb 3: 142 kB z 232 kB dostępnych dla aplikacji | – |
+| RAM (statyczny) | tryb 1: 127 kB (fw 1.1: + bufor wyścigów 8 kB, próbki 2000 × 28 B) z 232 kB dostępnych dla aplikacji | – |
+| Kasowanie obszaru wyścigów (1 MB) | < 0,3 s | – |
+| Skan wyścigów przy starcie (z weryfikacją CRC i sprawdzeniem pustości) | 0,32–0,34 s | – |
+| Pobieranie wyścigu USB | 65 kB/s | – |
+| Wyścig SIM: 664 próbki, zanik zasilania po 333 → odtworzone 324, limit 30 kB → koniec „pełna pamięć”, kolejny nie startuje, `RERASE` bez pobrania odrzucony | ✅ | – |
 
 Budżet RAM: próbki 1750 × 28 B = 49 kB; log zboczy wymiarowany z `MAX_MOTOR_RPM`
 = 40 000 rpm × okno 3,5 s × 1,1: tryb 1 5133 × 4 B = 20,5 kB, tryb 3 15 400 × 4 B
@@ -95,9 +129,9 @@ Budżet RAM: próbki 1750 × 28 B = 49 kB; log zboczy wymiarowany z `MAX_MOTOR_R
 | 3 | Gaz ±2 µs, uczenie neutrum | ✅ algorytm (SIM); ⏳ zgodność z symulatorem ESP32 – wymaga okablowania |
 | 4 | Hall ±0,5 % 500–30 000 rpm, szpilki, powrót do 0 | ✅ algorytm w trybach 1 i 3, kierunek A→B→C (SIM); ⏳ tor sprzętowy GPIOTE/PPI – wymaga hall_sim/auta |
 | 5 | Logger: pre-trigger, liczba próbek, LED | ✅ (1750 próbek, trigger 250, odstęp 2000 µs) |
-| 6 | Flash: 20 startów → 16 + overwritten 4; zanik zasilania; DEL (także DEL → natychmiastowy GET, seria pobierz+DEL); SAVING < 1 s | ✅ (zanik zasilania symulowany resetem w trakcie zapisu – `SIM RESETAT`; test z odłączeniem LiPo do wykonania) |
+| 6 | Flash: 20 startów → 16 + overwritten 4 (fw 1.1: 12 → 8 + 4); zanik zasilania; DEL (także DEL → natychmiastowy GET, seria pobierz+DEL); SAVING < 1 s | ✅ (zanik zasilania symulowany resetem w trakcie zapisu – `SIM RESETAT`; test z odłączeniem LiPo do wykonania) |
 | 7 | LIST/GET/DEL przez USB i BLE, wznawianie, przepustowość | ✅ |
-| 8 | Wektory testowe, testy analyze.py | ✅ 25 testów Pythona (w tym estymator C vs Python), 13 testów JS; płytka: 38/38 (`fw_test.py`) |
+| 8 | Wektory testowe, testy analyze.py | ✅ 33 testy Pythona (w tym estymator C vs Python i wyścigi), 17 testów JS; płytka: 38/38 (`fw_test.py`, fw 1.0) |
 | 9 | Aplikacja – demo, analysis.js przechodzi wektory | ✅ (pobieranie, DEL po zapisie, tagi, wykresy, porównanie, zerwanie połączenia) |
 | 10 | Aplikacja z prawdziwym Xiao na Androidzie, offline | ⏳ wymaga telefonu i hostingu HTTPS |
 | 11–13 | Testy z autem, kalibracja, prędkościomierz na torze | ⏳ wymagają auta |
@@ -139,7 +173,23 @@ Budżet RAM: próbki 1750 × 28 B = 49 kB; log zboczy wymiarowany z `MAX_MOTOR_R
   `tud_cdc_line_coding_cb` i przy 1200 bd ustawia magię DFU przez `sd_power_gpregret_set`
   (tak jak `BLEDfu`) – `arduino-cli upload` działa bez przycisku. Zapasowo komenda USB `BOOT [UF2]`.
   STATUS: `boot_hf` = 1, gdy poprzedni reset był z HardFault.
+* **Sloty startów: 8 zamiast 16** (fw 1.1) – druga połowa flash to obszar wyścigów. Test
+  „20 startów → 16 + overwritten 4” brzmi teraz „12 → 8 + 4”.
 * Komendy `SIM …`, `REBOOT`, `BOOT`, `DBG` – tylko USB, do testów na biurku.
+
+## LED
+
+| Stan | Kolor |
+|---|---|
+| uczenie neutrum | żółty miga |
+| IDLE (uzbrojony) | zielony |
+| zapis wyścigu | zielony z krótką przerwą co 1 s |
+| w pamięci niepobrane starty / wyścigi | zielony + krótki niebieski błysk co 2 s |
+| pamięć wyścigów pełna (albo wymaga przygotowania) | żółty błysk co 2 s |
+| RECORDING (start) | czerwony |
+| SAVING | fioletowy |
+| połączony z telefonem | niebieski |
+| błąd (IMU, flash, brak gazu, błąd zapisu wyścigu) | czerwony miga |
 
 ## Do zrobienia przy aucie
 

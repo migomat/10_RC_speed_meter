@@ -105,6 +105,7 @@ static void start_run(uint32_t trig_pos) {
   s_hdr.format_version = RUN_FORMAT_VERSION;
   s_hdr.header_size = RUN_HEADER_SIZE;
   s_hdr.seq = flash_next_seq();
+  flash_note_seq(s_hdr.seq);  // zarezerwowany od razu – wyścig nie dostanie tego samego
   s_hdr.unix_s = logger_unix_now();
   s_hdr.boot_count = flash_boot_count();
   s_hdr.uptime_ms = millis();

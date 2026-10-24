@@ -649,6 +649,22 @@ progu stanu wysokiego).
       bocznego (sprawdzenie `IMU_YAW_OFFSET_DEG`);
     - estymator w Pythonie i w JS daje te same wyniki na wektorach testowych.
 
+## Tryb wyścigu (faza 1b, fw 1.1)
+
+Drugi tryb pracy obok startów: **ciągły zapis całego wyścigu** (np. 6 min) do drugiej
+połowy flash. Szczegóły formatu: `docs/FORMAT.md`, komendy: `docs/PROTOCOL.md`, opis: `README.md`.
+
+- Flash: 8 slotów startów (1 MB) + obszar wyścigów 1 MB (`RACE_AREA_*`).
+- Próbka `RACE_RATE_HZ` = 50 Hz (20 B, średnia z taktów 500 Hz). Wyścig zaczyna się sam
+  (gaz > `RACE_START_PCT`, 1 s pre-trigger), kończy po `RACE_END_IDLE_S` postoju.
+- **Bez nadpisywania:** pełna pamięć = stop nagrywania wyścigów do skasowania z aplikacji.
+  Kasowanie tylko w całości (`RERASE`) i tylko gdy wszystkie wyścigi pobrane (`RDEL` po zapisie
+  u odbiorcy); `RERASE FORCE` – tylko świadomie (obce dane w obszarze).
+- Zanik zasilania w trakcie wyścigu to normalne zakończenie – rekord domykany przy starcie.
+- Analiza: `analyze_race` (Python) = `analyzeRace` (JS), wspólne wektory `test_vectors/race_*`.
+- Następny krok: podział na okrążenia (tor stały) – dopasowanie okrążeń po kursie z żyroskopu
+  i profilu prędkości, po zebraniu prawdziwych danych.
+
 ## Zasady dla agenta
 
 - Nie zmieniać założenia, że urządzenie tylko słucha – żadnego wyjścia do ESC.
