@@ -38,7 +38,7 @@ def test_race_matches_expected(name):
     assert len(res["laps"]) == len(exp["laps"])
     for got, e in zip(res["laps"], exp["laps"]):
         assert (got["i_a"], got["i_b"], got["good"]) == (e["i_a"], e["i_b"], e["good"])
-        for k in ("time_s", "dist_m", "v_max", "err_m"):
+        for k in ("time_s", "dist_m", "v_max", "err_m", "close_m"):
             assert close(got[k], e[k]), f"lap {k}"
     assert close(res["track"]["length_m"], exp["track"]["length_m"])
     for k in ("x", "y", "v"):
@@ -58,6 +58,19 @@ def test_race_physics_sanity(name):
     # tor: długość okrążenia jak w symulacji, okrążenia (poza pierwszym z dojazdem) dobre
     assert abs(m["track_length_m"] - tr["lap_m"]) < 0.01 * tr["lap_m"]
     assert m["laps_n"] in (tr["laps"] - 1, tr["laps"])   # ostatnie 360° zależy od szumu żyroskopu
+
+
+@pytest.mark.parametrize("name", RACES)
+def test_race_track_closed(name):
+    data, exp = load(name)
+    res = analyze_race(parse_race(data), exp["config"])
+    tr = res["track"]
+    # domknięcie okrążeń: koniec toru i każdego okrążenia trafia w początek
+    assert math.hypot(tr["x"][-1] - tr["x"][0], tr["y"][-1] - tr["y"][0]) < 1e-9
+    for lx, ly in zip(tr["laps_x"], tr["laps_y"]):
+        assert math.hypot(lx[-1] - lx[0], ly[-1] - ly[0]) < 1e-9
+    for lp in res["laps"]:
+        assert lp["close_m"] >= 0.0
 
 
 def test_race_kind_crc_and_padding():

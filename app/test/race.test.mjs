@@ -38,7 +38,7 @@ for (const name of races) {
     res.laps.forEach((lp, j) => {
       const e = exp.laps[j];
       assert.deepEqual([lp.i_a, lp.i_b, lp.good], [e.i_a, e.i_b, e.good]);
-      for (const k of ['time_s', 'dist_m', 'v_max', 'err_m']) assert.ok(close(lp[k], e[k]), `lap ${j} ${k}: ${lp[k]} != ${e[k]}`);
+      for (const k of ['time_s', 'dist_m', 'v_max', 'err_m', 'close_m']) assert.ok(close(lp[k], e[k]), `lap ${j} ${k}: ${lp[k]} != ${e[k]}`);
     });
     assert.ok(close(res.track.length_m, exp.track.length_m));
     for (const k of ['x', 'y', 'v']) {

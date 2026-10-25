@@ -580,7 +580,7 @@ export function raceLaps(ds, heading, vTrack, t, i0, i1, cfg) {
     let d = 0, vmax = -Infinity;
     for (let i = a + 1; i <= b; i++) d += ds[i];
     for (let i = a; i <= b; i++) if (vTrack[i] > vmax) vmax = vTrack[i];
-    laps.push({ i_a: a, i_b: b, t_start: t[a], time_s: t[b] - t[a], dist_m: d, v_max: vmax, good: false, err_m: NaN });
+    laps.push({ i_a: a, i_b: b, t_start: t[a], time_s: t[b] - t[a], dist_m: d, v_max: vmax, good: false, err_m: NaN, close_m: NaN });
   }
   if (laps.length < 2) return { laps, track: null };
   const dists = laps.map((lp) => lp.dist_m).sort((p, q) => p - q);
@@ -597,7 +597,13 @@ export function raceLaps(ds, heading, vTrack, t, i0, i1, cfg) {
     for (let i = a + 1; i <= b; i++) d[i - a] = d[i - a - 1] + ds[i];
     const q = new Float64Array(npts);
     for (let kk = 0; kk < npts; kk++) q[kk] = d[d.length - 1] * kk / (npts - 1);
-    return [interpLin(q, d, x.subarray(a, b + 1)), interpLin(q, d, y.subarray(a, b + 1)), interpLin(q, d, vTrack.subarray(a, b + 1))];
+    const lx = interpLin(q, d, x.subarray(a, b + 1)), ly = interpLin(q, d, y.subarray(a, b + 1));
+    // domknięcie: rozjazd końca z początkiem (buksowanie, poślizg boczny) rozłożony
+    // proporcjonalnie do drogi – koniec okrążenia trafia w jego początek
+    const ex = lx[npts - 1] - lx[0], ey = ly[npts - 1] - ly[0];
+    lp.close_m = Math.hypot(ex, ey);
+    for (let kk = 0; kk < npts; kk++) { lx[kk] -= ex * kk / (npts - 1); ly[kk] -= ey * kk / (npts - 1); }
+    return [lx, ly, interpLin(q, d, vTrack.subarray(a, b + 1))];
   });
   let jref = good[0];
   for (const j of good) if (Math.abs(laps[j].dist_m - med) < Math.abs(laps[jref].dist_m - med)) jref = j;

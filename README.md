@@ -84,12 +84,17 @@ Obok startów (500 Hz, 4 s, bufor pierścieniowy) Xiao nagrywa **całe wyścigi*
 * **Okrążenia i mapa toru** (tor stały, jazda w kółko; `race_laps` / `raceLaps`): pozycja = droga
   z licznika zboczy × kierunek z całki żyroskopu (bias z postoju przed startem). Granica okrążenia:
   kurs od startu przekracza kolejne wielokrotności 360°. Okrążenia z drogą ±20 % od mediany
-  (`race_lap_dist_tol` – buksowanie, uderzenie) pomijane. Tor = średnia dobrych okrążeń
-  przepróbkowanych po drodze (200 punktów) i dopasowanych do wzorca obrotem i przesunięciem
-  (3 iteracje). W aplikacji: mapa z kolorem prędkości, tabela okrążeń (czas, strata do najlepszego,
+  (`race_lap_dist_tol` – buksowanie, uderzenie) pomijane. Każde okrążenie przepróbkowane po drodze
+  (200 punktów) i **domknięte**: rozjazd końca z początkiem (`close_m`) odejmowany proporcjonalnie
+  do drogi, więc koniec trafia w początek. Tor = średnia dobrych okrążeń dopasowanych do wzorca
+  obrotem i przesunięciem (3 iteracje). W aplikacji: mapa z kolorem prędkości, tabela okrążeń (czas, strata do najlepszego,
   droga, v maks.), dotknięcie okrążenia = to okrążenie na mapie i na wykresach.
   Salon 2026-10-24: 16 okrążeń, tor ok. 11,8 m, najlepsze 6,00 s; Python = JS z dokładnością 1e-14.
   Ograniczenie: buksowanie zawyża drogę (tor surowy „odpływa”), dlatego dopasowanie okrążeń.
+  Tor 2026-10-25 (seq 4): rozjazd okrążeń 1,5–2,9 m przy ok. 27 m (5–10 %). Przyczyna to droga
+  z kół, nie kąt: przechylenie płytki 0,8°, nasycenia żyroskopu brak (max 167 °/s), skala kąta
+  1,00 daje najlepsze domknięcie. Droga okrążeń skacze 24–30 m i rośnie z udziałem pełnego gazu,
+  czyli buksowanie (do tego poślizg boczny w zakrętach).
 
 ## Synchronizacja między urządzeniami (GitHub)
 

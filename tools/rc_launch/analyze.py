@@ -617,7 +617,8 @@ def race_laps(ds, heading, v_track, t, i0, i1, cfg):
     Pozycja: droga z licznika zboczy × kierunek z żyroskopu. Granica okrążenia: kurs od startu
     przekracza kolejne wielokrotności 360° (w kierunku jazdy). Okrążenia z drogą odbiegającą od
     mediany o > race_lap_dist_tol (buksowanie, uderzenie) – odrzucone. Tor = średnia dobrych
-    okrążeń przepróbkowanych po drodze i dopasowanych (obrót + przesunięcie) do wzorca."""
+    okrążeń przepróbkowanych po drodze, domkniętych (close_m = rozjazd końca z początkiem przed
+    korektą) i dopasowanych (obrót + przesunięcie) do wzorca."""
     n = len(ds)
     x, y = [0.0] * n, [0.0] * n
     for i in range(1, n):
@@ -636,7 +637,8 @@ def race_laps(ds, heading, v_track, t, i0, i1, cfg):
         a, b = bounds[j], bounds[j + 1]
         laps.append(dict(i_a=a, i_b=b, t_start=float(t[a]), time_s=float(t[b] - t[a]),
                          dist_m=float(sum(ds[a + 1:b + 1])),
-                         v_max=float(max(v_track[a:b + 1])), good=False, err_m=float("nan")))
+                         v_max=float(max(v_track[a:b + 1])), good=False, err_m=float("nan"),
+                         close_m=float("nan")))
     if len(laps) < 2:
         return laps, None
     dists = sorted(lp["dist_m"] for lp in laps)
@@ -656,8 +658,14 @@ def race_laps(ds, heading, v_track, t, i0, i1, cfg):
         for i in range(a + 1, b + 1):
             d.append(d[-1] + ds[i])
         q = [d[-1] * k / (npts - 1) for k in range(npts)]
-        rs.append((interp_lin(q, d, x[a:b + 1]), interp_lin(q, d, y[a:b + 1]),
-                   interp_lin(q, d, v_track[a:b + 1])))
+        lx, ly = interp_lin(q, d, x[a:b + 1]), interp_lin(q, d, y[a:b + 1])
+        # domknięcie: rozjazd końca z początkiem (buksowanie, poślizg boczny) rozłożony
+        # proporcjonalnie do drogi – koniec okrążenia trafia w jego początek
+        ex, ey = lx[-1] - lx[0], ly[-1] - ly[0]
+        lp["close_m"] = math.hypot(ex, ey)
+        lx = [lx[k] - ex * k / (npts - 1) for k in range(npts)]
+        ly = [ly[k] - ey * k / (npts - 1) for k in range(npts)]
+        rs.append((lx, ly, interp_lin(q, d, v_track[a:b + 1])))
     jref = good[0]
     for j in good:
         if abs(laps[j]["dist_m"] - med) < abs(laps[jref]["dist_m"] - med):

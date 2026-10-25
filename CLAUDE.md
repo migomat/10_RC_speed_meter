@@ -663,7 +663,8 @@ połowy flash. Szczegóły formatu: `docs/FORMAT.md`, komendy: `docs/PROTOCOL.md
 - Zanik zasilania w trakcie wyścigu to normalne zakończenie – rekord domykany przy starcie.
 - Analiza: `analyze_race` (Python) = `analyzeRace` (JS), wspólne wektory `test_vectors/race_*`.
 - Okrążenia i mapa toru: `race_laps` / `raceLaps` – granice co 360° kursu z żyroskopu, pozycja
-  z drogi kół, tor = średnia dopasowanych okrążeń (opis w README). Wektory zawierają okrążenia i tor.
+  z drogi kół, okrążenia domykane (rozjazd `close_m` rozłożony po drodze), tor = średnia dopasowanych
+  okrążeń (opis w README). Wektory zawierają okrążenia i tor.
 
 ## Synchronizacja (aplikacja 1.3)
 

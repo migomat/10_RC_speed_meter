@@ -9,7 +9,7 @@ import * as db from './storage.js';
 import { syncedCharts, scatterChart, trackMap, PALETTE } from './charts.js';
 import { GitHubStore, syncAll } from './sync.js';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d = 2) => (v == null || Number.isNaN(v) ? '–' : v.toFixed(d).replace('.', ','));
 
@@ -712,8 +712,10 @@ function renderRaceTrack(res) {
   const sel = state.raceLap;
   $('raceTrackTitle').textContent = sel >= 0 ? `Tor – okrążenie ${sel + 1}` : `Tor – średnia z ${good.length} okrążeń`;
   trackMap($('raceTrack'), res.track, { lap: sel, goodLaps: good, vConv: speedConv, unit });
+  const closeAvg = good.reduce((s, j) => s + laps[j].close_m, 0) / good.length;
   $('raceTrackNote').textContent = `Długość toru ok. ${fmt(res.track.length_m, 1)} m. Kolor = prędkość, kropka = początek okrążenia, strzałka = kierunek jazdy. ` +
-    'Pozycja z kierunku (żyroskop) i drogi kół – okrążenia z buksowaniem lub uderzeniem (droga ±20 % od typowej) są pomijane w średniej.';
+    'Pozycja z kierunku (żyroskop) i drogi kół – okrążenia z buksowaniem lub uderzeniem (droga ±20 % od typowej) są pomijane w średniej. ' +
+    `Okrążenia domknięte: koniec mijał się z początkiem średnio o ${fmt(closeAvg, 1)} m (buksowanie, poślizg) – rozłożone wzdłuż okrążenia.`;
   let html = `<table><tr><th>#</th><th>czas</th><th>strata</th><th>droga</th><th>v maks.</th></tr>`;
   html += `<tr class="lap${sel < 0 ? ' sel' : ''}" data-lap="-1"><td colspan="5">tor średni · czas [s], droga [m], v [${unit}]</td></tr>`;
   laps.forEach((lp, j) => {
